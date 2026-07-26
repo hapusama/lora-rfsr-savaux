@@ -1,0 +1,1240 @@
+3520                                                                                   IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+
+   Enabling Large Scale LoRa Parallel Decoding With
+    High-Dimensional and High-Accuracy Features
+        Weiwei Chen , Xianjin Xia , Member, IEEE, Shuai Wang , Tian He , Fellow, IEEE, Shuai Wang ,
+                                      Gang Liu , and Caishi Huang
+
+
+   Abstract—LoRaWAN is a prominent technology for Low Power                        As LoRaWAN utilizes a lightweight ALOHA-based MAC pro-
+Wide Area Networks (LPWAN). However, the increasing network                        tocol [4], the increasing network size makes concurrent trans-
+size has introduced a significant challenge: packet collisions result-             missions inevitable. If this issue is not adequately addressed, it
+ing from concurrent transmissions in LoRaWAN. Previous studies
+either overlooked the issue by examining limited features or tackled               can significantly affect network performance.
+it with intricate receivers employing up to eight antennas. To                         Prior work has leveraged signal features from both the time
+achieve a more favorable balance between implementation cost and                   and frequency domains at the PHY layer to decode concurrent
+system performance, we introduce Hi2 LoRa—a solution utilizing                     packets. Specifically, Ftrack [5] and CIC [6] examine the fre-
+highly dimensional and accurate features for LoRa concurrent                       quency continuity and timing misalignment of chirp signals to
+decoding, implemented with only two receiving antennas. The
+feature dimensions are expanded through an exploration of various                  separate concurrent symbols. CoLoRa [7] and PCube [8] explore
+hardware imperfections and inherent channel state information                      amplitude or phase features to decode symbols in concurrent
+specific to each transceiver pair. To enhance feature accuracy, low                packets. SCLoRa [9], NScale [10], and Pyramid [11] jointly
+pass filters and BiLSTM networks are applied to capture and                        consider timing and amplitude features of the signals for con-
+learn their temporal patterns. Additionally, an efficient collision                current decoding. Magnifier [12] investigates multiple hardware
+suppression strategy is introduced to mitigate feature corrup-
+tion from concurrently transmitted packets. Extensive real-world                   imperfections for parallel decoding. However, although these
+testbed evaluations demonstrate that the achievable concurrency                    approaches perform well for low-concurrency networks, we
+in Hi2 LoRa approaches that of state-of-the-art approaches with                    argue that they are inefficient in handling large-scale concurrent
+significantly higher complexity (e.g., utilizing eight antennas) or                transmissions.
+exceeds prior work by a factor of 2.7 with comparable complexity                       The LoRa physical layer (PHY) partitions a channel into
+(e.g., using two antennas).
+                                                                                   multiple evenly spaced frequency intervals, referred to as fre-
+   Index Terms—LoraWAN, parallel decoding, multiple antennas,                      quency bins. Each frequency bin is allocated to a specific symbol.
+interference suppression.                                                          Due to hardware imperfections, the demodulated frequency of a
+                                                                                   received symbol, termed as the frequency tone may deviate from
+                                                                                   its transmitted frequency by a fractional amount of frequency
+                            I. INTRODUCTION                                        bin. The receiver quantizes the frequency tone to the frequency
+                                                                                   bin it locates to decode the symbol. Since the number of available
+      VER the past few years, Low Power Wide Area (LPWA)
+O     networks have experienced rapid development. Accord-
+ing to Cisco’s Virtual Network Index (VNI) [1], LPWA con-
+                                                                                   frequency bins is fixed and limited, as the number of concurrent
+                                                                                   transmitters increases, chances are that more than one concurrent
+                                                                                   symbols (from different transmitters) using adjacent frequency
+nections are expected to grow to 1.9 billion by 2023. Among
+                                                                                   tones (known as frequency tone collisions). This situation is akin
+the various LPWA technologies, LoRaWAN (LoRa Wide Area
+                                                                                   to the pigeonhole problem, in which symbols from concurrent
+Network) [2], [3] has gained significant attention worldwide.
+                                                                                   packets represent the pigeons and frequency bins encompass the
+                                                                                   frequency tones are the holes (as seen in Fig. 1(a)). Frequency
+                                                                                   tone collision brings in substantial feature distortions to the
+  Received 11 March 2024; revised 20 November 2024; accepted 5 December            collided frequency tones, making them impossible to be iden-
+2024. Date of publication 13 December 2024; date of current version 4 April
+2025. This work was supported by the National Natural Science Foundation of        tified (as depicted in Fig. 1(b)). Moreover, the probability that
+China under Grant 62172092, Grant 62102336, and Grant 62272098. Recom-             frequency tone collision occurs increases with network concur-
+mended for acceptance by H. S. Kim. (Corresponding author: Weiwei Chen.)           rency. As shown in Fig. 1(c), with 40 SF10 concurrent packets,
+  Weiwei Chen is with the School of Computer Engineering and Science, Shang-
+hai University, Shanghai 200444, China (e-mail: chen.ava.0012@gmail.com).          the probability of frequency tone collisions reaches 23.7%, lead-
+  Xianjin Xia is with the Department of Computer Science, The Hong Kong            ing to unbearable decoding errors. This situation only worsens
+Polytechnic University, Hong Kong.                                                 with more concurrent nodes. Unfortunately, previous studies
+  Shuai Wang, Tian He, and Shuai Wang are with the School of Computer
+Science and Engineering, Southeast University, Nanjing 211102, China.              have not tackled this issue adequately in a simple-to-implement
+  Gang Liu is with the Shenzhen Institute for Advanced Study, University of        manner.
+Electronic Science and Technology of China, Sichuan 610056, China.                     Besides the frequency tone collisions, previous studies use
+  Caishi Huang is with the Department of Biomedical Science, University of
+Macau, Macau 999078, China.                                                        few features, such as packet amplitude or arrival time, for
+  Digital Object Identifier 10.1109/TMC.2024.3517343                               concurrent decoding. These low-dimensional features restrict
+
+      1536-1233 © 2024 IEEE. All rights reserved, including rights for text and data mining, and training of artificial intelligence and similar technologies.
+Personal use is permitted, but republication/redistribution requires IEEE permission. See https://www.ieee.org/publications/rights/index.html for more information.
+
+
+          Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                                               3521
+
+
+
+
+Fig. 1. An illustration of how frequency tone collision happens. In Fig. 1(a), the left column represents the concurrently transmitted symbols from different
+packets (i.e., from Pkt1 , Pkt2 , . . . , Pktn ). Different symbols in a packet will be carried by different frequency tones. In Fig. 1(b), when receiving symbols from three
+concurrent packets (”Pkt1”,”Pkt2” and ”Pkt3”), features from the symbols belonging to ”Pkt1” and ”Pkt2” cannot be retained as their frequency tones collide. The
+blue line in the figure represents the overall received signals from three concurrent symbols. Due to the collision, features of ”Pkt1” and ”Pkt2” deviate drastically
+from their actual values. In Fig. 1(c), ”N10” refers to the case with 10 concurrent nodes. All the nodes in Fig. 1(c) transmit SF10 packets.
+
+
+
+the network’s decoding capacity. When a large number of nodes
+transmit concurrently, some packets inevitably have close fea-
+ture values in terms of packet timing, amplitude or both, which
+can cause ambiguity issues and lead to decoding errors. To tackle
+this issue, adding more features can help unravel tangled packets.
+Overall, the features’ dimension and accuracy are critical for
+network concurrency.
+   To this end, we propose Hi2 LoRa, a framework that en-
+ables highly dimensional and highly accurate features for LoRa
+concurrent decoding. Hi2 LoRa expands the feature dimension
+to account for hardware imperfections and the channel state
+intrinsic to each transceiver pair. Specifically, in Hi2 LoRa, the
+profile of a packet refers to the set of features associated with                       Fig. 2.   An illustration of the impacts of offsets on the received signal.
+a packet. This profile is constructed from the offsets, such as
+carrier frequency offsets (CFO), sampling time offsets (STO),
+and sampling frequency offsets (SFO), as well as the amplitudes                         as Wi-Fi’s interference with LoRa, ZigBee, or Bluetooth. The
+and phases of each frequency tone in a packet. Hi2 LoRa decodes                         contributions are summarized below.
+the packet by selecting frequency tones whose features match the                           1) We propose Hi2 LoRa, a cost-effective framework that
+packet profile. To overcome frequency tone collisions, Hi2 LoRa                               utilizes highly dimensional and highly accurate features
+uses two antennas to suppress the strongest interference from                                 for concurrent LoRa decoding. By effectively suppressing
+one of the colliding symbols.                                                                 frequency tone collisions, the accuracy of the features can
+   However, suppressing collisions is a non-trivial task as ac-                               be significantly improved. Moreover, the introduction of
+curate channel state information is difficult to retrieve when                                high dimensional features can considerably reduce decod-
+multiple packets are present concurrently. Furthermore, as de-                                ing ambiguity, which increases with network concurrency.
+picted in Fig. 2 in Section II, the offsets also vary with time,                           2) Hi2 LoRa utilizes a two-stage algorithm. In the first stage,
+adding to the complexity of the decoding process. To main-                                    frequency tones with unambiguous offset features are
+tain highly precise time-varying packet profiles, we classify                                 matched to the packet. The features of these already
+the profile into two categories: the channel-insensitive profile,                             matched symbols are leveraged to finely align the receiv-
+such as offsets, and the channel-sensitive profile, such as am-                               ing window to the transmitting signal. The aligned signals
+plitude and phase. Hi2 LoRa first uses low-pass filters to track                              are then used to learn and predict the entire packet pro-
+the channel-insensitive profile as it changes much slower than                                file using Bidirectional-Long-Short-Term-Memory (BiL-
+the channel-sensitive profile. It then utilizes partial channel-                              STM) networks. With the complete profile, symbols yet to
+insensitive profiles and deep learning techniques to establish                                be decoded are identified with amplitude, phase and offset
+channel-sensitive profiles. Additionally, to suppress frequency                               information. The strongest interference is suppressed be-
+tone collisions, channel state information will be constructed                                fore decoding symbols that face frequency tone collisions.
+from the channel-sensitive profiles. Although Hi2 LoRa is tai-                             3) We implemented Hi2 LoRa on a testbed comprising of
+lored for LoRaWAN, the proposed strategies can be generally                                   40 off-the-shelf LoRa nodes and a USRP-based gateway
+applied to other IoT systems such as ZigBee and Bluetooth                                     with two antennas. Extensive evaluations are conducted,
+networks to support concurrent transmissions. It can also be                                  and the results demonstrate that Hi2 LoRa achieves a good
+utilized to remove Cross Technology Interference (CTI), such                                  balance between implementation cost and performance.
+
+           Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3522                                                                                IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+
+      Specifically, the achievable concurrency in Hi2 LoRa is
+      close to that of PCube [8] with eight antennas, and it
+      achieves up to 2.7× of concurrency compared to PCube
+      with two antennas. Similarly, Hi2 LoRa shows up to 3.5×
+      of concurrency compared to CIC [6] with one antenna.
+  The rest of the paper is organized as follows. Section II
+provides backgrounds and motivations. Section III presents the                  Fig. 3. The fine-grained CFO and the STO of a packet. Here fine-grained CFO
+overall design structure of Hi2 LoRa. Section IV introduces the                 means the fractional frequency bin of the CFO. The signals are collected from
+detailed designs of the Packet Management module in Hi2 LoRa.                   a SF10 packet transmitted from a COTS SX1278 with bandwidth = 250 KHz.
+Section V illustrates how the payload of a packet is decode in
+Hi2 LoRa. Section VI demonstrates the test-bed and the eval-
+uation results obtained from it. Related works are studied in
+Section VII. A conclusion is drawn in Section VIII.
+
+             II. BACKGROUNDS AND MOTIVATIONS
+A. A Primer on LoRa
+   LoRa uses CSS (Chirp Spread Spectrum) [13] as its modula-
+tion scheme. CSS divides the bandwidth into m equally spaced                    Fig. 4.   Phase and amplitude of a packet w/wo offsets compensation.
+frequency bins. Each symbol zs ∈ [0, m − 1] is modulated by
+setting the starting frequency to frequency bin zs . When the
+signal is received and de-chirped, it is translated into a single               C. Design Opportunities
+frequency tone, which is then quantized to its nearest frequency
+bin. The frequency bin corresponds to the discrete interval in                     1) Hardware Offsets Facilitating the Retrieval of High-
+which a frequency tone is located. Different symbols use differ-                Dimensional and High-Accuracy Features: In LoRa parallel
+ent frequency tones, and the presence or absence of a frequency                 decoding, concurrent packets can be efficiently separated only
+tone encodes the information to be transmitted.                                 when a large number of highly accurate features associated
+                                                                                with each packet are available. Exploring a variety of offsets
+                                                                                in parallel decoding helps to retrieve such features. The reasons
+B. Offsets in a Received LoRa Packet
+                                                                                are listed as follows.
+   Hardware imperfections can cause offsets between a LoRa                         First, hardware offsets are useful features that can be exploited
+transceiver pair. There are three main offsets: CFO (Carrier                    to expand the feature dimension of each packet. As shown in
+Frequency Offset), STO (Sampling Time Offset), and SFO                          Choir [14], the cumulative distribution (CDF) of the fractional
+(Sampling Frequency Offset). CFO adds frequency drifts in                       part of CFO from 30 nodes span across [-0.5,0.5] frequency bin
+the received signal; STO, besides drifting the frequency, also                  with equal probability. This observation makes CFO suitable to
+causes phase shifts of the chips in a symbol. SFO changes the                   identify packets from different nodes. In addition, the STO be-
+sampling time of every chip in the receiving packet, leading to                 tween different packets (even from the same device) are different
+a time-varying STO for different symbols.                                       as the transceiver radio pair is unsynchronized, which triggers
+   Fig. 2 provides a pictorial representation of the impact of                  a different sampling timing offsets when start transmitting a
+offsets on the received LoRa signal. The upper section of the                   packet.
+figure (denoted as Chirp Signal) displays the original chips of                    Second, hardware offsets can be leveraged to recover other
+every chirp where a set of preambles are transmitted, and each                  features, such as amplitude and phase features of symbols in a
+chirp is made up of two chips represented by dark and light lines.              packet with high accuracy. For one thing, features extracted from
+The STO, CFO and the overall frequency drift of the sth chirp                   signals with offset compensation can be accurately estimated
+are denoted by τs , δs and fs , respectively, while the difference              and used for parallel decoding. Fig. 3 showcases the CFO and
+of the two slopes represents the SFO between the transceivers.                  STO of various symbols within a packet. While the CFO is
+   As shown in the figure, the slope of the received signal is                  relatively stable, the figure also reveals a gradual increase in STO
+lower than that of the transmitted signal, leading to the sampling              from -0.2 to 0.05 frequency bins. Complementing this, Fig. 4
+time at the receiver to lag behind, causing a growing STO over                  demonstrates the amplitude and phase of frequency tones in the
+time due to SFO. The lower section of the figure (denoted as                    same packet both with and without offsets. Notably, the figure
+De-chirped Signal) shows the de-chirped chips of the preambles.                 reveals large variations in amplitude and phase in a packet when
+The combination of CFO, STO, and SFO causes the received                        offsets are not compensated. As a result, phase and amplitude
+frequency to deviate from the transmitted one. Moreover, STO                    features are hard to be estimated accurately without removing
+also introduces symbol-dependent phase shifts to a subset of                    the inherent hardware offsets.
+chips in a chirp (i.e., the red dash lines in the figure). Overall,                To summarize, given various hardware offsets, we can ex-
+the offsets create both frequency and phase drifts when receiving               tract eight features from two receiving antennas: CFO (Car-
+a LoRa packet, leading to a reduction in signal quality.                        rier Frequency Offset), STO (Symbol Timing Offset), phase
+
+        Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                              3523
+
+
+
+
+                                                                                Fig. 6.   Design architecture of Hi2 LoRa.
+Fig. 5. The average and maximum estimation error for High, Medium and
+Low SNR symbols.
+
+
+                                                                                   2) Collision Suppression With Two Receiving Antennas: We
+offset, and bin amplitude for each antenna. In contrast, prior                  conducted a simulation-based experiment to investigate the
+research typically employs a lower-dimensional set of features,                 probability of frequency tone collisions under varying levels
+such as using only the CFO [14] or time misalignment [5], or                    of network concurrency. In this experiment, the number of con-
+combining the amplitude of a frequency bin with frequency                       currently transmitting nodes ranges from 10 to 40. The packet
+continuity [6], and occasionally pairing bin amplitude with time                length for each node is set to 50 symbols, and the Spreading
+misalignment [9]. Thus, Hi2 LoRa surpasses existing methods                     Factor (SF) is fixed at SF10.
+by leveraging a richer, higher-dimensional feature set.                            To test worst-case performance, each node operates with a
+   Additionally, compensating for the offsets help us to extract                near 100% duty cycle; that is, after transmitting a packet, each
+“high accuracy” features for parallel decoding. We conducted                    node randomly waits for one to two symbols before starting
+an experiment to evaluate the precision of the fine-grained fea-                the transmission of another packet. A symbol is considered
+tures for parallel decoding in scenarios involving 40 concurrent                to experience a frequency tone collision if the frequency tone
+nodes. The experiment involved collecting 1000 packets, each                    that carries the symbol is within five frequency bins of another
+containing 50 symbols, from a single node with an average                       symbol.
+SNR of 50 dB received across two antennas. We computed the                         The collision probability, demonstrated in Fig. 1(c), reveals
+associated CFO, STO, amplitude, and phase of each symbol                        that over 23.7% of symbols are affected by frequency tone
+in the packets. Given the minimal noise environment, these                      collisions. This issue becomes even more pronounced for low
+computed features were treated as ground-truth values, and                      signal-to-noise ratio (SNR) packets. Conventional approaches,
+the corresponding symbols were labeled as target symbols. To                    on the other hand, neglect the frequency tone collisions issue, as
+simulate varying noise levels, we recorded environmental noise                  they primarily cater to networks characterized by low concur-
+in the absence of packet transmissions and scaled the energy                    rency, in which frequency tone collisions merely occur.
+of the target symbols to match this noise, creating three SNR                      Fortunately, recent advancements in multiple antennas allow
+categories: i) High SNR: SNR>10 dB; ii) Medium SNR: 0 dB                        concurrent packets to be separated using spatial multiplexing,
+< SNR < 10 dB; and iii). SNR < 0 dB.                                            significantly improving system performance [15], [16]. While
+   For each SNR level, we generated 50,000 symbols randomly,                    frequency tone collisions are frequent, most collisions occur
+enabling a robust analysis of the feature accuracy under different              only between two frequency tones, as shown in Fig. 1(c). For
+noise conditions. After generating the symbols, we integrate                    example, when there are 40 concurrent transmitting nodes, the
+them with signals received from 40 concurrently transmitting                    probability of three or more symbols colliding with each other
+nodes and extract the CFO, STO, amplitude, and phase infor-                     is no more than 5.5%. This makes it reasonable for us to use two
+mation from both antennas. For each data collection instance, we                receiving antennas to suppress the strongest interference from
+randomly select a starting chip and retrieve the subsequent 2sf                 collided symbols.
+chips (representing a chirp signal), which is then combined with                   Though the simulation is intended for illustrative purposes.
+a randomly scaled target symbol. If the target symbol encounters                While the simulation setting is relatively simple, it demonstrates
+a frequency tone collision— the frequency tone that encodes                     the trend that frequency collisions become more frequent as
+the symbol is within five bins of other concurrent symbols—we                   network concurrency increases. Additionally, the results suggest
+discard the chirp signal and attempt a new one.                                 that frequency tone collisions occur most often between two
+   Fig. 5 illustrates the estimation errors for CFO, STO, compen-               concurrently transmitting nodes.
+sated amplitude, and phase across high, medium, and low SNR
+symbols. The results reveal that the average estimation error for                            III. DESIGN OVERVIEW AND CHALLENGES
+CFO and STO across High, Medium, and Low SNR packets
+ranges from 0.7% to 2.0%, while the average estimation error                    A. Design in a Nutshell
+for amplitude and phase remains between 3.0% and 9.7%. These                       Fig. 6 illustrates the design architecture of Hi2 LoRa.
+findings indicate that the features of symbols across different                    The packet management module detects and records the ar-
+SNR conditions can be accurately estimated.                                     rival and departure of a packet. When a packet arrives, it performs
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3524                                                                                IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+coarse-grained synchronization between the transmitter and re-
+ceiver pair. Notice that, achieving chip-level synchronization is
+challenging at this stage, particularly as down chirps may face
+interference from concurrent transmissions. The initial states of
+the packet, such as its initial CFO (Carrier Frequency Offsets),
+STO (Sampling Time Offsets) as well as the initial channel states               Fig. 7.   The PHY-layer LoRa Packet format.
+are extracted from the preambles and sync words of the newly
+arrived packet.
+    Once the information in the preambles are processed, the                      3) How to Suppress Frequency Tone Collisions With Low
+receiver passes the remaining signals to the packet decoder.                    Computation: An efficient yet easy to implement approach is
+The packet decoder performs two matching rounds to derive                       required to confront with the signal corruption caused by other
+the final payload. First, it decodes a subset of symbols in a                   colliding frequency tones (from different transmitters). This
+packet. Symbols can be decoded successfully in the first round                  challenge is detailed in Section V-E.
+if there is one and only one frequency tone that can be matched
+to the symbol. The first round matching only leverages the                                  IV. DESIGN OF THE PACKET MANAGEMENT
+offsets information, thus does not require accurate chip-level
+                                                                                   This section introduces the design of the Packet Management
+synchronization between the transceiver.
+                                                                                module. This module first detects the existence of a newly arrived
+    After the partial matching module, a subset of symbols will
+                                                                                packet, synchronizes to the new packet, and extract the initial
+be decoded. The offsets and phase information of these symbols
+                                                                                states in the packet.
+will be used to align all chips in a symbol with the target packet,
+thus achieve chip-level synchronization between the transceiver.
+The fine-grained synchronization procedure is crucial to extract                A. Detecting Newly Arrived Packets
+the packet profile with high accuracy as the chip level misalign-                  The PHY-layer LoRa packet format is illustrated in Fig. 7. A
+ment introduces high phase variations of a frequency tone. If not               LoRa packet starts with a set of preamble chirps (usually 6 to 8
+handled properly, such phase variations will lead to inaccurate                 preamble symbols). The former part of the preamble are basic
+channel estimation, and imprecise profile construction.                         up-chirp symbols, and the last two preamble symbols carry the
+    The complete profile of symbols yet to be decoded is con-                   network ID associated with a packet. 2.25 down-chirp symbols
+structed using the profile construction module after the receiver               (called Start Frame Delimiter, SFD) follows the preamble. The
+synchronizes to the transmitter finely. This sub-module input                   SFD is used for synchronizing a LoRa packet in standard LoRa
+the offsets and channel state information of the already decoded                PHY. Data symbols are then organized subsequently.
+symbols into the specially designed BiLSTM networks to esti-                       When network concurrency is low, the receiver can easily
+mate the profile of the symbols remain to be decoded.                           detect and synchronize with a packet by checking the boundary
+    In the second round, the decoder adopts the complete match-                 of its SFD. However, since the up-chirping signals (symbols
+ing module to decode the rest of the symbols. In case frequency                 from other transmitters) are not strictly orthogonal to the down-
+tone collision occurs, it exploits signals from two receiving an-               chirping SFD, the more on-going transmissions, the higher in-
+tennas to suppress the collisions before examining the features.                terference to the SFD, and the more difficult to identify the SFD
+All the symbols will be decoded after the complete matching                     correctly, making it impractical for synchronizing concurrent
+module.                                                                         packets in high-concurrency networks.
+                                                                                   We thus bypass the use of SFD for packet detection and syn-
+                                                                                chronization. Instead, we rely on preamble chirps for detection
+B. Design Challenges
+                                                                                and coarse-grained synchronization. The detection process be-
+   1) How to Extract the Initial State of a Packet in Highly                    gins with a sliding window initialized to a length of 6 chirps (the
+Concurrent Networks: Extracting the initial state accurately                    minimum number of preamble symbols in LoRa packets [17]).
+is crucial for decoding a packet. However, a large number                       The window slides m   8 chips if no packet is detected. Otherwise,
+of concurrent packets will bring in excessive interference to                   it will enter the coarse-grained packet synchronization module,
+each other, bringing in imprecise state estimation if symbol are                in which the window size will be adjusted to encompass all the
+evaluated separately. We introduce a novel estimation approach                  preamble chirps.
+that extracts the initial states over all the preambles and the sync               We first discuss how to detect the presence of a new packet
+words jointly. The details are provided in Section IV-C.                        with a given detection window. The packet detection module
+   2) How to Construct a Packet’s Time-Varying Profile: Since                   computes the amplitude of each chirp within this window. Since
+the precision of packet profiles is essential in identifying and                the phase information of the newly arrived packet is unavail-
+disentangling concurrent packets, algorithms should be carefully                able, the amplitude of the preamble chirps is approximated by
+designed to trace the time variations of the profiles. We introduce             summing the absolute values of the frequency bins from two
+a fine-grained synchronization algorithm to facilitate accurate                 antennas. Let us,v,1 and us,v,2 represent the amplitude of the sth
+channel state tracking in Section V-B. Moreover, a Bi-LSTM                      chirp at frequency tone v from antennas 1 and 2, respectively.
+network structure is proposed in Section V-C for predicting the                 The overall amplitude of frequency tone v from both antennas is
+feature profile of a packet.                                                    approximated as |us,v,1 | + |us,v,2 |. When a new packet arrives,
+
+        Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                              3525
+
+
+
+the overall amplitude of a frequency tone v remains to be high                                                    TABLE I
+                                                                                                                 NOTATIONS
+in consecutive chirps.
+   Besides the base up-chirps, the last two chirps in the preamble
+carry the network ID, which are known values. Let the trans-
+mitted symbols of these last two preamble chirps be denoted as
+vID,1 and vID,2 , respectively. A newly arrived packet is detected
+(with base up-chirp carried by frequency tone v) if the following
+conditions are met:
+   1) There exists a frequency tone v, and the amplitude of
+      frequency tone v of at least two preamble chirps before
+      the network ID exceed the threshold;
+   2) The amplitude of the frequency tone vID,1 + v of the
+      penultimate chirp exceeds the threshold; or the amplitude
+      of the frequency tonevID,2 + v of the final chirp exceeds
+      the threshold; or both amplitudes exceed the threshold.
+
+B. Coarse-Grained Packet Synchronization
+   Once detecting a new packet, the detection window is adjusted
+to encompass all the preamble chirps, thus synchronize the
+packet with the receiver. This procedure consists of two part:
+a. searching for all the base up-chirp symbols; and b. coarsely
+synchronizing to the packet.
+   We first examined the chirps prior to the detection window
+                                                                                packet before decoding it. In particular, the set of initial states
+one by one. For the currently inspected chirp, if the amplitude
+                                                                                to be extracted are the fine-grained CFO, STO, as well as
+of its bth frequency tone also exceeds the threshold, the chirp will
+                                                                                the average amplitude of the preamble chirps and the phase
+be included into the detection window. The detection window
+                                                                                difference of the preambles chirps from the two receiving
+expands until no base up-chirp symbol can be observed outside
+                                                                                antennas.
+the detection window.
+                                                                                    1) Retrieving Fine-Grained Offsets From the Given Signal:
+   Once detecting all possible base up-chirps, the detection win-
+                                                                                We first demonstrate the impact of the offsets on the received
+dow slides chip by chip, and the accumulated amplitude of all the
+                                                                                signal. Table I lists commonly used notes in the current and the
+frequency bins of the base up-chirps and the network ID chirps
+                                                                                subsequent sections.
+are calculated. The starting point of the detection window who
+                                                                                    In Chirp Spread Spectrum (CSS), a symbol (also known as
+has the largest cumulative amplitude is determined as the starting
+                                                                                a chirp) is composed of m = 2sf chips, and sf is a parameter
+point of the new packet. Up to this point, the coarse-grained
+                                                                                adaptive to a receiver’s SNR.
+synchronization can be achieved.
+                                                                                    Since a transceiver pair uses separate oscillators to transmit
+   Once obtaining the detection window, it searches for the
+                                                                                and received data, several offsets, such as CFO (Carrier Fre-
+starting chip of the first preamble synbol in the window with
+                                                                                quency Offset), STO (Sampling Time Offset) and SFO (Sam-
+the highest cumulative amplitude.
+                                                                                pling Frequency Offset), exist between the transmitter and the
+   Currently, only coarse-grained synchronization is feasible due
+                                                                                receiver. CFO introduces an additional frequency drift at the
+to the unavailability of accurate synchronization using SFD. This
+                                                                                received signal; STO, as will be shown in (1), causes a phase
+limitation is exemplified in the Fine-grained synchronization
+                                                                                drifts between chips in a symbol; SFO, changes the STO over
+sub-module to be discussed in Section V-B.
+                                                                                time, introducing time variations to the features used for parallel
+   Please be aware that though matching all the preamble chirps
+                                                                                decoding.
+can effectively detect a newly arrived packet with low SNR,
+                                                                                    To fully explores the features, Hi2 LoRa, thus, leverages a
+it is still not able to resolve concurrent packets with over-
+                                                                                general approach to extract CFO, STO and SFO jointly with
+lapping preambles, i.e., two packets whose preamble chirps
+                                                                                high precision. For brevity, we only demonstrate the offsets of
+experience frequency tone collisions. However, the probabil-
+                                                                                one antenna. The derivation of signals from multiple antennas
+ity that preamble chirps from two concurrent packets suf-
+                                                                                can be extended directly from the discussion. In particular, let
+fer from frequency tone collisions is extremely low for net-
+                                                                                ζs , δs , and τs be the SFO, CFO and STO of the sth symbol
+works with medium concurrency (i.e., 40 nodes wifh SF=10).
+                                                                                observed by the gateway. Similar to the approaches discussed in
+Therefore, this situation will not cause significant performance
+                                                                                CONST [18] and Magnifier [12], the de-chirped signal at one of
+degradation.
+                                                                                the receiving antenna (denoted as xs,i ) can be approximated as
+                                                                                                                    i
+C. Initial States Estimation                                                                hs ej2πφs ej2π(zs +fs ) m + ws,i , 0 ≤ i < m − zs ,
+                                                                                  xs,i =                             i
+   The last sub-module in the Packet Detector strives to es-                                hs ej2πφ̂s ej2π(zs +fs ) m + ws,i , m − zs ≤ i < m.
+timate the initial fine-grained states of the newly detected                                                                                    (1)
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3526                                                                                IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+Here zs is the value of the sth symbol, hs is the channel state,                addition, (2h) is the amplitude of a symbol after compensating
+and ws,i is the environmental noise observed at the ith chip of                 for offsets. As shown in Fig. 4(b), the compensated amplitude
+symbol s after the de-chirping operation. The phase of the signal               achieves higher processing gain, resulting in more stable feature
+is normalized with 2π, enabling a clearer representation of the                 estimations. We employ Zoom-FFT [19], and the approaches in
+relationship between offset-induced phase and frequency drift                   Magnifier [12] to search for the frequency drift fs and calculate
+as functions of CFO and STO, as will be discussed in the rest of                the STO τs .
+the section.                                                                       Please be aware that in this paper, the fine-grained offsets of
+   With offsets, the i-th transmitted chip in the s-th chirp chirp              signals received by two antennas are assume to be the same. The
+will be received and sampled as the (i + τs )-th chip, where τs                 reason are the following. First, the receiver gets two different
+is the STO of the s-th chirp. In other words, the (i − τs )-th                  signal copies from two antennas of the same gateway. As the
+transmitted chip will be sampled and processed as the i-th chip                 reception of two antennas is controlled by the same oscillator,
+at the receiver. By subsisting (i − τs ) with i in (1), demodulating            the CFO and SFO of the two copies are almost the same.
+it with the standard de-chirping and FFT operation, we can derive               Second, since the distance between two antennas is only several
+(2a-2h).                                                                        centimeters to several tens of centimeters, the STO observed by
+   Denote φs = φCFO,s + φSTO,s ; φCFO,s and φSTO,s as the cu-                   different antennas are extremely close. For instance, denote the
+mulative phase changes due to CFO and STO up to the s-th                        distance between the two antennas as da , the speed of light as c,
+chirp. For instance, when s = 1, φCFO,s = 0; and when s = 2,                    the bandwidth of the signal as W , the STO difference between
+φCFO,s = δ1 . Also let fs be the overall frequency drift of the sth             two antenna is dacW = 2.5 ∗ 10−5 chip if da = 0.3 m and W =
+symbol, and φs be the overall phase of a received chirp. These                  250 KHz. We thus can safely ignore the offsets different between
+value can be expressed as:                                                      two antennas.
+                                                                                  2) Estimating the Initial States of the Packet: The previ-
+   φCFO,s =           δi ,                                      (2a)            ous subsection discusses how to retrieve fine grained offsets
+             1≤i≤s−1                                                            information within a chirp. Due to collisions and noise, the
+                 zs τs   τs   τ2                                                estimated offsets can deviate from the actual value. In addition,
+  φSTO,s = −           +    + s ,                                        (2b)   accurate initial state estimation is crucial to decode a packet
+                  m      2   2m
+                                                                                successfully as the features in a packet change over time, and we
+  φ̂STO,s = φSTO,s + τs ,                                                (2c)   can only leverage the preceding and current features to estimate
+       f s ≈ − τs + δ s ,                                                (2d)   subsequent ones. In this subsection, we introduce an algorithm to
+                                                                               estimate the fine-grained offsets of all the symbols in preamble
+       τ s ≈ τ0 +         (m − 1)ζi ,                                    (2e)   jointly. Notably, the joint estimation approach aims to provide a
+                   1≤i≤s−1                                                      more accurate initial state (i.e., the intial CFO, STO, amplitude
+                                                                               and phase) estimation for decoding a packet.
+                 
+                                               i
+                                                                                   Denote Δs as the phase difference between signals from
+       as =               xs,i e−j2π(zs +fs ) m
+                                                                               antenna 1 and 2 of preamble s, as there are only six to eight
+                0≤i<m−zs
+                                                                             preamble chirps (24 ms to 32 ms for SF9 packets with band-
+                                                                      
+                                                                  i            width = 125 KHz), we assume the Channel State Information
+              +e−j2πτs                     xs,i e   −j2π(zs +fs ) m
+                                                                        (2f)
+                                                                               (CSI) remain stable when transmitting the preamble chirps, and
+                              m−zs ≤i<m
+                       √                                                        approximate Δs to a fixed value Δ0 . In addition, CFO and SFO
+          ≈ m|hs | + O( mγ) ≈ m|hs |.                                    (2g)   are assumed to remain stable for all preamble symbols to ease
+                                     ∠hs                                        the modeling of the phase drift due to CFO (φCFO,s ) and STO
+       φs = φCFO,s + φSTO,s +                                            (2h)   (φSTO,s ). With this, CFO (δs ) and SFO (ζs ) is replaced with the
+                                     2π
+                                                                                fixed initial value δ0 and ζ0 that do not change across symbols.
+   Here γ is the energy of the environmental noise, and ∠hs                     Ideally, phase and frequency drifts in preamble chirps without
+represents the angle of the channel state hs . Even for a low                   frequency tone collisions are
+                                                             √
+Signal to Noise Ratio (SNR) packet, the noise term O( mγ)
+is much lower than the received signal m|hs |. For instance,                                     φCFO,s ≈ φCFO,s−1 + δ0 ,                             (3a)
+when SNR=-8 dB for SF10 packets, m = 21 0 = 1024, and                                                                        m(ζ0 − 1)
+   √                 s|                                                                          φSTO,s ≈ φSTO,s−1 +                   ,              (3b)
+O( mγ) ∼ O( m|h    40 ) << m|hs |. Therefore, we can omit the                                                                   2
+noise term in the following calculation. Note that, in (2), we only
+                                                                                                       τs ≈ τs−1 + m(ζ0 − 1)                          (3c)
+consider the impact of hardware imperfections on the received
+signal, without accounting for frequency tone collisions from                                                                 m(ζ0 − 1)
+                                                                                                      φs ≈ φs−1 + δ0 +                  ,             (3d)
+other nodes. In this context, the interference from concurrent                                                                   2
+packets can also be approximated as noise. The case of symbols
+                                                                                                      fs ≈ fs−1 + m(ζ0 − 1).                          (3e)
+experiencing frequency tone collisions will be discussed in
+Section V-E. Additionally, as SNR keeps decreasing, the noise                     Here (3a) and (3b) is derived from (2a) and (2b), respectively;
+term can distort the accuracy of the features. However, this is a               and the fact that preambles correspond to symbol 0 (zs = 0)
+common problem for parallel decoding, but not a unique issue                    and τs << m. (3c) is feasible as the STO changes is mainly
+for our approach. We leave this issue as our future work. In                    caused by the SFO between the transceiver pair. (3d)–(3e) are
+        Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                               3527
+
+
+
+derived from (2d) and (2h). Let τ  be the STO of the first detected             selecting a set of frequency tone candidates through frequency
+preamble. With (3), the phase (φs ) and frequency drift (fs )                    tone pre-screening, and second, matching one frequency tone
+becomes                                                                          from the pre-screening set and decoding it as the target symbol.
+                                      τ  + sm(ζ0 − 1)                           It’s important to note that this module performs matching for a
+               φs ≈ φ0 + sδ0 +                         ,                (4a)     set of symbols in a packet based solely on offset features. There
+                                              2
+                                                                                 is a possibility that some symbols may not find a match with
+                fs ≈ δ0 + τ  + sm(ζ0 − 1).                             (4b)     any frequency tone due to the limited number of features. Any
+  We perform regressions on the phase and frequency of all the                   unmatched symbols will be addressed in subsequent modules.
+preambles with (4) to derive Δ0 , δ0 and ζ0 . We have:                              The frequency tones of demodulated symbols are usually
+                                                                                surrounded by side-lobes due to various offsets and arrival
+     arg max  
+                      |   e−j2πφs (as,1,fs + ej2πΔ0 as,2,fs )|                 time misalignment among received packets. This module lever-
+           {Δ0 ,τ ,δ0 ,ζ0 }
+                              s                                                  ages a frequency bin pre-screening procedure to select the true
+                                                                        (5a)     frequency tones from the side-lobes when decoding symbols.
+                                                                                 Specifically, it uses a standard FFT procedure (as done in a
+   s.t.   (2f), (4a), (4b)                                              (5b)
+                                                                                 standard LoRa decoder) to evaluate the spectrum distribution of
+where as,1,fs is the amplitude of the sth preamble chirp evaluated              each integer frequency bin. We then search for a set of frequency
+with frequency drift fs (refer to (2f)). Note that the preamble                  bins, and inspect their fine-grained offset features only if the
+chirps are transmitted with symbol 0, and received with fre-                     frequency bins are local maximal. E.g., frequency bin v is a
+quency tone fs (due to offsets). By multiplying ej2πΔ0 to the                    local maximal if as,k,v > as,k,v−1 and as,k,v > as,k,v+1 , where
+signals from the second antenna, we compensate for the phase                     as,k,v is the amplitude of frequency bin v of the sth symbol
+difference between two antennas, thus use the overall amplitude                  from antenna k. The pre-screening procedure can reduce the
+for initial state estimation.                                                    number of frequency tones to be evaluated, and avoid decoding
+   The initial states are consisted of the estimated CFO, STO of                 ambiguity caused by side-lobes.
+the first data symbol, the phase difference between the signal                      Denote the selected frequency tones from the pre-screening
+from two receiving antennas, and the estimated amplitude of                      procedure as Vs ; the estimated CFO and STO of the sth symbol in
+the first data symbol from the two receiving antennas. Suppose                   the packet as δs and τs respectively; the CFO and STO evaluated
+                                                                                                                                      
+there are ns preamble chirps, with (5), we can retrieve the initial              at frequency tone v from antenna k as τs,k,v     and δs,k,v . For any
+CFO and the phase difference as δ0 and Δ0 , respectively. The                    frequency tone v ∈ Vs , we evaluate its STO and CFO from two
+estimated STO (denoted by τ0 ) and the estimated amplitude from                  antennas with (2b)–(2d). If there is only one frequency tone v
+two antennas becomes                                                             that meets the criteria listed in (7), v will be matched to symbol
+                                                                                 s and δ̃s and τ̃s will be updated as
+      τ0 = τ  + (ns + 2.25)m(ζ0 − 1)                                   (6a)
+            1                                                                          
+                                                                                       |δs,k,v − δ s | ≤ Γδ ,                         k ∈ {1, 2}        (7a)
+    a0,k =         |as,k,fs |,                      k ∈ {0, 1} .        (6b)
+           ns s                                                                          
+                                                                                       |τs,k,v − τ s | ≤ Γτ .                         k ∈ {1, 2}        (7b)
+   Here the estimated initial STO of the first data symbol is
+                                                                                        
+                                                                                                         
+                                                                                                as,1,v δs,1,v            
+                                                                                                               + as,2,v δs,v,2
+calculated by considering the accumulated sampling timing                              δs,v =                                   ,                       (7c)
+drift of ns preambles and 2.25 down-chirp SFD symbols. τ0                                              as,1,v + as,2,v
+is calculated with the accumulated sampling time offsets after
+                                                                                        
+                                                                                                         
+                                                                                                as,1,v τs,1,v            
+                                                                                                               + as,2,v τs,2,v
+(ns + 2.25)m chips. In total, the initial states to be estimated                       τs,v =                                   ,                       (7d)
+                                                                                                       as,1,v + as,2,v
+are {δ0 , τ0 , Δ0 , a0,1 , a0,2 }.
+                                                                                                                
+   Note that, as will be discussed, the initial states will be used for                δs+1 = (1 − ρδ )δs + ρδ δs,v ,                                   (7e)
+partial matching module. Therefore, we do no need to calculate                                                  
+the phase of the first data symbol from each antenna, but only                         τs+1 = (1 − ρτ )τs + ρτ τs,v .                                   (7f)
+need the phase difference information.
+                                                                                    Here as,k,v is the amplitude of frequency tone v from antenna
+                                                                                                                                        
+              V. DESIGN OF THE PACKET DECODER                                    k. (7c)–(7d) calculate its average offsets. δs,v  and τs,v are then
+                                                                                 fed into the low pass filter (7e)–(7f) to smooth the estimation. ρδ
+  This section provides all the necessary details to decode a
+                                                                                 and ρτ are two parameters controlling the changing rate of CFO
+concurrently transmitted packet.
+                                                                                 and STO. If no frequency tone is paired with the sth symbol,
+                                                                                 δs = δs−1 and τs = τs−1 . The intuition of (7) is that though the
+A. Partial Matching                                                              packet profile changes over time, adjacent symbols in a packet
+   The Packet Decoder first leverages the limited features,                      demonstrate similar profiles. Therefore, we can leverage this
+e.g., the CFO and STO information for the Partial Matching                       property to decode symbols that do not experience decoding
+sub-module.                                                                      ambiguity. (7c) and (7d) represent the average CFO and STO
+   In particular, this sub-module decodes a subset of symbols                    calculated from the two antennas. δs+1 and τs+1 denote the
+using only offset features. The process involves two steps: first,               time-smoothed CFO and STO for the next symbol, respectively.
+
+          Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3528                                                                                IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+A low-pass filter is applied to smooth these values, ensuring
+stability and reducing noise.
+
+B. Fine-Grained Chip Level Synchronization
+   This subsection details the methodology for achieving chip-
+level synchronization between the gateway and the transmitter.
+It is crucial to emphasize that chip-level synchronization forms
+the basis for precisely extracting the phases of each symbol. Let
+φs,k represent the phase information from antenna k after offset
+compensation. φs,k can be derived by deducing the CFO and
+STO induced offsets (e.g., (2a)–(2b)) from (2h). That is:                       Fig. 8.   The network structure of the proposed BiLSTM.
+
+                                                  (zs +fs )i
+          ys,k,1 =                  xs,i,k e−j2π       m        ,       (8a)
+                      0≤i≤m−zs −1                                                   Here δ is the average CFO, and the compensated phase φs,k
+                                                      (zs +fs )i               only carries the channel state experienced by symbol s. More-
+                                                −j2π
+          ys,k,2 =                   xs,i,k e              m        ,   (8b)
+                                                                                over, channel state changes gradually, and only varies slightly
+                      m−zs ≤i≤m−1
+                                                                                for a small number of symbols. This implies that consecutive
+                    ∠(ys,k,1 + e−j2πτs ys,k,2 )                                 φs,k tends to be relatively stable too.
+           φs,k =                             ,                       (8c)
+                               2π                                                   On the other hand, the last term ( zms − 12 )τ0 in (9) can results in
+                                   zs τs    τs     τ2                          significant changes of the compensated phase φs,k . Based on the
+           φs,k   = φs,k −   δs +       −       − s ,                 (8d)    above observation, we conclude that the optimal STO, namely
+                                     m        2    2m
+                                                                                τ0∗ , should causes the least turbulence of the compensated phase
+   Here xs,i,k refers to the received ith chip of the sth chirp                 information. Therefore, we use the Minimum Mean Square Error
+from the kth antenna. The notation xs,i,k is similar to xs,i .                  (MMSE) and the following optimization algorithm to search for
+While xs,i refers to the received ith chip of the sth chirp when                the optimal τ0∗ .
+there is only one antenna. According to (8d), it is evident that                                                   
+the phase of a symbol depends on the transmitting frequency                                  τ0∗ = arg min
+                                                                                                        
+                                                                                                                             |φs,k − φs−1,k |2        (10)
+tone. For instance, when frequency tone zs is transmitted, it                                             τ0
+                                                                                                               {s∈S,s−1∈S}
+introduces a phase component τsmzs . This value varies from −2π
+to 2π depending on the exact value of the transmitted symbol
+zs and the STO τs between the transceiver. When τsmzs is not                    C. Profile Construction
+carefully compensated for in the phase of the frequency peak, it                   Given the set of frequency tones selected from previous
+cause drastic variations even between adjacent symbols. Refer to                module, we construct the complete profile of the packet in this
+Fig. 4(a), the phase feature is useless should phase compensation               module.
+is performed.                                                                      1) Workflow of the Profile Construction Sub-Module: We
+   Moreover, as the coarse-grained packet synchronization is not                first leverage a two layer BiLSTM networks to estimate the CFO
+able to align the first chip of the symbol at the transmitter with              and STO for symbols yet to be decoded. Once the per symbol
+the first chip received at the gateway, it is possible that STO                 STO and CFO are available, they are utilized to compensate for
+and zs > 1. Thus both integer and fractional part of τs should                  the phase and amplitude of the actual frequency peak of all the
+be retained in high precision so as to facilitate accurate phase                already matched symbols with (2). The amplitude and phase
+tracking (e.g., φs,k ).                                                         profile of the already matched symbols are then fed into another
+   We next introduce an efficient strategy to finely align the                  BiLSTM network to construct the complete profile of a packet.
+receiver with the transmitter chip by chip. We first let S be a                    Notably, two separate Bi-LSTM network are leveraged for
+set of symbols decoded from the partial matching module, and                    constructing the packet profile. The first one is for CFO and
+ΦS = {φs |k ∈ S} be their phases. Also denote τs = τ0 + τs,2                   STO estimation, and the second one is for amplitude and phase
+where τ0 refers to the initial integer STO, and τs,2 is the esti-              estimation. We use the network for amplitude and phase estima-
+                             τs2
+mated STO from (7). As 2m         << 0, the phase of each frequency             tion (channel state estimation) as an example to illustrate how
+peak after compensating for the offsets (φs,k from (8d)) can be                 the Bi-LSTM is constructed.
+simplified as                                                                      2) Network Structure of the Bi-LSTM Network: The architec-
+                                                                              ture of the BiLSTM network is plotted in Fig. 8. When construct-
+                                zs    1                                        ing packet profiles, each symbol within the packet is associated
+            
+  φs,k ≈ φs,k −         δs +         −     τs                   (9a)
+                                 m 2                                            with a pair of masks, denoted as {ms,1 , ms,2 }. ms,1 =1 if the
+                                                                            sth symbol is decoded in the partial matching sub-module, and
+                                    zs   1             zs   1
+            
+       ≈ φs,k − (s − 1)δ +             −      τs,2 +      −     τ.             0 otherwise. Given ms,1 =0, quadratic regression is utilized to
+                                    m 2                m 2 0                    make the initial predictions for the unmatched symbols. The
+                                                                (9b)            second mask ms,2 indicates the length of a packet. That is
+
+        Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                                3529
+
+
+
+ms,2 = 1 if the packet length is no smaller than s, and ms,1 = 0                 the features of a frequency tone v ∈ Vs with (2) and (8), and
+otherwise.                                                                       choose the one that satisfies the conditions:
+   The pair of mask, as well as the phase and amplitude informa-                                 
+                                                                                               |δs,k,v − δ̃s | ≤ β Γ̃δ ,             k ∈ {1, 2}         (12a)
+tion of symbol s from two antennas are organized into a vector
+{as,1 , φs,1 , as,2 , φs,2 , ms,1 , ms,2 } as shown in Fig. 8. Moreover,                         
+                                                                                               |τs,k,v − τ̃s | ≤ β Γ̃τ ,             k ∈ {1, 2}         (12b)
+the batch size is set to 100 data packets, and each packet lasts for
+688 data symbols (the maximum payload size of a packet with                               1        as,k,v
+                                                                                                 ≤         ≤ 1 + β Γ̃a ,             k ∈ {1, 2}         (12c)
+any SF, i.e., a SF6 packet with CR 4/8 that contains 255 Bytes                         1 + β Γ̃a    ãs,k
+payload data). Batch Normalization is performed for the input
+data.                                                                                       |φs,k,v − φ̃s,k | ≤ β Γ̃φ .             k ∈ {1, 2}         (12d)
+   The Bi-LSTM network contains a forward and a backward                         where   φs,k,vis the phase of the sth symbol evaluated at fre-
+LSTM layer, their output size is organized as (100, 688, 10).                    quency tone v. Initially, β is set to 1. If there is only one
+The contact layer concatenates the result from the two LSTM                      frequency tone v ∗ satisfies (12), the symbol is decoded as v ∗ .
+network as shown in Fig. 8, and passes them into the dense layer.                If no frequency tone satisfies (12), it enters the frequency tone
+The dense layer uses a Fully Connected (FC) network to make                      collision suppression sub-module shown later. If there are more
+the final prediction. The output of the network is the estimated                 than one frequency tones that satisfy (12), we choose the one
+amplitude and the phase of all the symbols in a packet.                          that meets all the conditions in (12) with the least β. The exact
+   When training the network, 10000 packets with different                       values of the threshold parameters are discussed in Section V-F.
+channel conditions and packet length are collected. We then
+randomly drop 10% to 40% symbols in a packet to train the                        E. Complete Matching With Frequency Tone Collisions
+parameters. Data augmentation is performed by adding Gaussian
+noise to the received data. The loss function (denoted as L) is                     We exploit spatial multiplexing with signals from two re-
+set as                                                                           ceiving antennas to suppress collisions. As has been illustrated
+                                                                                in Section II, most symbols only experience frequency tone
+            L=                |as,k ej2πφs,k − ãs,k ej2πφ̃s,k |,   (11)         collision from one packet. E.g., with 40 concurrent packets, the
+                 s,k∈{1,2}                                                       probability that symbols suffer collisions from more than one
+                                                                                 packet is only 2.0% to 6.9%. Therefore, we aim at suppressing
+where ãs,k and φ̃s,k are the estimated amplitude and the phase                  the most severe corruptions from one collided packet. In the fol-
+information of the k antenna output by the network.                              lowing subsections, we first discuss how to suppress interference
+   It is worth to note that CFO and STO estimation are relatively                when the interfering node is known. Collision suppression from
+straightforward since CFO remains stable within a packet, and                    unknown interfering node is discussed later.
+STO variation is primarily influenced by SFO, which is also                         1) Frequency Tone Collision Suppression With a Known
+stable within the packet duration. Traditional regression methods                Inteferer c∗ : Let the set of collided packets be C. Denote the
+can therefore achieve high estimation accuracy. The Bi-LSTM                      estimated channel state of the target packet and the collided
+is primarily designed for channel state estimation, which is more                packets as Hs = [hs,1 , hs,2 ]T and Hc = [hc,1 , hc,2 ]T , c ∈ C;
+variable due to the longer duration of LoRa packets—often                        the collided frequency component in the spectrum domain as zt
+tens to hundreds of milliseconds—exceeding the wireless chan-                    and zc ; the received signals and the noise from two receiving an-
+nel’s coherence time. As the Bi-LSTM effectively handles both                    tennas as Q = [q1 , q2 ]T and Nf = [n1 , n2 ]T . Here [·]T denotes
+channel-sensitive and insensitive features, we leverage the same                 the transpose operation of a matrix. Q becomes
+network for estimating offsets and channel states.                                                                
+   Overall, the Bi-LSTM network is capable of accurately pre-                                       Q = Hs z s +       Hc zc + N.              (13)
+dicting both hardware offsets, and the channel state variations                                                        c∈C
+over time, thereby significantly improves the accuracy of the                                   ∗
+                                                                                 Designate c as the packet that causes the strongest signal
+estimated packet profile.                                                        corruption to the target packet (c∗ ∈ C), we construct a sup-
+                                                                                 pression vector of interferer c∗ , denoted as Wc∗ , where Wc∗ =
+D. Complete Matching Without Frequency Tone Collisions                           [1, −hc∗ ,1 /hc∗ ,2 ] and Wc∗ Hc∗ = 0; and a suppression valida-
+   This module utilizes all available features, including both off-              tion vector for the sth symbol of the packet to be decoded as
+sets and channel state information, to decode symbols that suffer                Ws = [1, −hs,1 /hs,2 ] and Ws Hs = 0. Now multiply Q with
+from decoding ambiguity, but not frequency tone collisions.                      Wc∗ and Ws respectively, we can get
+After obtaining the profile, all symbols will be matched with                                                               
+                                                                                                                   
+a frequency tone. Specifically, if a symbol does not experience                     Wc∗ Q = Wc∗ Hs zs + Wc∗           H c z c + Wc ∗ N
+frequency tone collision, we decode the symbol with a frequency                                                        c∈C
+tone whose offsets, amplitude, and phase features match the
+                                                                                         ≈ Wc∗ Hs zs + Wc∗ N,                      (14a)
+packet profile. If frequency tone collision occurs, we explore
+                                                                                                         
+signals from two antennas to suppress signal corruption. In                                     
+particular, let δ̃s , τ̃s , ãs,k and φ̃s,k be the values derived from the          Ws Q = Ws        Hc zc + Ws N ≈ Ws Hc∗ zc∗ + Ws N.
+constructed profile, and {Γ̃δ , Γ̃τ , Γ̃a , Γ̃φ } are thresholds used for                             c∈C
+
+the matching. For symbol s yet to be decoded, we evaluate all                                                                                           (14b)
+          Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3530                                                                                         IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+    Here the approximation is done by assuming there is one                              operation is a standard operation applied to both standard LoRa
+dominant interferer in the collided packet set C. Notably, to                            PHY and Hi2 LoRa (in the Partial Matching sub-module). Also
+construct Wc∗ for all possible interferers, we need to collect                           denote As = [as,1 , as,2 ] as the estimated fine-grained amplitude
+the Channel State Information (CSI) from all the transmitters.                           of the target frequency bin from two receiving antennas. As is
+This can be easily achieved as a gateway is responsible to                               determined after running the Profile Construction sub-module.
+decode all the packets from all the transmitters. The gateway                               Now, instead of evaluating the fine grained features directly,
+can thus facilitate CSI sharing when performing parallel de-                             we first estimate the coarse-grained effective amplitude of var-
+coding. In addition, since constructing Wc∗ only requires re-                            ious frequency tones with Wc Di , and the fine-grained effective
+trieving the value of hc∗ ,1 /hc∗ ,2 , which can be easily retained                      amplitude with Wc As . Frequency tone i will be excluded from
+once the complete profile of interferer c∗ is constructed. That                          further evaluation if the difference between its coarse-grained
+                                                  
+is hc∗ ,1 /hc∗ ,2 ≈ ac∗ ,1 /ac∗ ,2 ej2π(φc∗ ,1 −φc∗ ,2 ) , where ac∗ ,1 , ac∗ ,2 ,   effective amplitude and the fine-grained effective amplitude
+φc∗ ,1 and φc∗ ,2 are the amplitude and phase of interfering node                      exceeds a pre-defined threshold, that is
+c∗ estimated from the complete profile construction procedure.
+                                                                                                   1     |Wc Di |
+While the suppression vector Wc∗ in (15a) mitigates the en-
+                                                                                                     
+                                                                                                       <           < β,      ∀ 0 ≤ i < 2sf , c ∈ C.        (15)
+ergy contribution from the dominant interference, the validation                                   β     |Wc As |
+vector Ws in (15b) provides an additional layer of assurance
+                                                                                         Here β  is a parameter that are similar to those used in the
+by verifying that the dominant interference originates from the
+                                                                                         complete matching (12) sub-module without frequency tone
+interferer c∗ .
+                                                                                         collisions. The likelihood of a noisy frequency bin satisfying
+    2) Frequency Tone Collision Suppression From the Unknown
+                                                                                         (15) is low, e.g., say the probability is approximately 10%.
+Interfering Node: If the interfer is known, collision can be easily
+                                                                                         This indicates that, on average, the condition in (15) effectively
+resolved by applying the suppression vector Wc∗ to the received
+                                                                                         filters out 90% of noisy frequency bins, significantly reducing
+signal. However, as the decoder has no prior knowledge about
+                                                                                         computational complexity during collision suppression of the
+c∗ , we need to search a frequency tone v, and an inteferer c∗ , such
+                                                                                         received signals.
+that, by applying Wc∗ to v, the collided frequency tone carrying
+                                                                                             Initially, β  is set to one. If no frequency tone satisfies (15),
+the symbol from the target packet (and the corresponding feature                           
+                                                                                         β is adjusted downward to the largest value that allows at least
+profile) can be well recovered.
+                                                                                         one frequency tone to meet the condition. Conversely, if multiple
+    Recall from (14a), by suppressing the collided packet, the
+                                                                                         frequency bins satisfy (15), all of them are selected for further
+amplitude, and phase information of the target packet from the
+                                                                                         testing in subsequent steps.
+two antennas will change accordingly. Hence we cannot utilize
+                                                                                             Once a set of symbols that have passed the pre-screening
+the packet profile before interference suppression for parallel
+                                                                                         process have been collected, the one satisfies all the following
+decoding when encountering frequency tone collision. To this
+                                                                                         constraints will be selected
+end, we construct a fine-grained effective profile for symbol
+s as {δ̃s , τ̃s , ãs,c∗ , φ̃s,c∗ }. In the fine-grained effective profile,                                        |δ̄s,v − δ̃s | ≤ β Γ̃δ ,               (16a)
+δ̃s and τ̃s are the same as estimated by the complete profile
+constructed procedure as the linear operation in (14a) between                                                      |τ̄s,v − τ̃s | ≤ β Γ̃τ ,              (16b)
+the received signals will not change the fine-grained CFO and
+                                                                                                                  |δ̄v,c∗ − δ̃c∗ | ≤ β Γ̃δ ,              (16c)
+STO of a symbol. The amplitude (denoted as ãs,c∗ ) and phase
+(denoted as φ̃s,c∗ ) profiles are adjusted with ãs,c∗ = |Wc∗ Hs |,                                               |τ̄v,c∗ − τ̃c∗ | ≤ β Γ̃τ ,              (16d)
+and φ̃s,c∗ = ∠(Wc∗ Hs ), where the operations | · | and ∠(·) take
+                                                                                                              1        ās,v
+the amplitude and the phase of a complex value respectively.                                                         ≤        ≤ 1 + β Γ̃a ,               (16e)
+Naively, to enable parallel decoding with collision suppression,                                           1 + β Γ̃a   ãs,c∗
+we need to construct the effective profile of all possible fre-                                                 |φ̄s,v − φ̃s,c∗ | ≤ β Γ̃φ .                (16f)
+quency tone i with all different c∗ , and decode the symbol with
+the most probable frequency tone i. However, this process incurs                            Here, δ̄s,v and τ̄s,v , ās,v , and φ̄s,v are the effective CFO, STO,
+intolerably high computation overhead. For instance, assessing                           amplitude and phase information of the packet to be decoded
+the fine-grained features of a frequency bin demands O(m2 )                              (derived from (13a)). δ̄v,c∗ and τ̄v,c∗ are the effective CFO and
+operations, where m = 2sf represents the number of chirps                                STO for the interferer c∗ derived with (13b). (16a)–(16b) and
+in a symbol. If m frequency bins need evaluation, the overall                            (16e)–(16f) evaluate whether the CFO, STO, effective ampli-
+decoding complexity with frequency tone collision approaches                             tude, and effective phase of the frequency tone (post-interference
+to O(m3 ).                                                                               suppression) align with the estimated effective profile. Mean-
+    To address this issue, akin to the Partial Matching module                           while, (16c)–(16d) provide an additional verification to ensure
+detailed in Section V-A, we introduce a pre-screening method                             that the dominant interference originates from the interferer c∗ .
+to eliminate a majority of frequency tones from performing                                  If there are multiple frequency tone that satisfy all the con-
+interference suppression.                                                                straints in (16), one of them will be randomly chosen as the
+    Specifically, let Di = [di,1 , di,2 ] where di,k is the amplitude                target one carried by the symbol. If no frequency tone satisfy the
+of the ith frequency bin received from the kth antenna after the                         constraints, we decrease β to make one frequency tone satisfy
+coarse-grained FFT operation. Note that, the coarse-grained FFT                          the constraints.
+
+          Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                               3531
+
+
+
+   While the proposed frequency tone collision suppression
+method effectively mitigates collisions caused by a single inter-
+ferer, it is important to note that its effectiveness decreases when
+multiple interferers significantly obstruct the target symbol or
+when consecutive preambles from two packets experience fre-
+quency tone collisions. In such cases, the collision suppression
+capability of two antennas may be insufficient, and additional
+antennas become necessary. However, the likelihood of these
+scenarios is low (as shown in Fig. 1(c), the probability of three               Fig. 9. Hm , Mm and Lm represent the 95th percentile of the CFO and STO
+                                                                                estimation errors for packets with SNR = 10 dB, 0 dB and −10 dB respectively.
+or more symbols using the same frequency tone is below 5.5).                    Ha , Ma , and La represent average estimation errors.
+As a result, two antennas are generally sufficient to handle the
+majority of frequency tone collisions.
+                                                                                                                 TABLE II
+   3) Incorporating Collision Suppression Into Hi2 LoRa: To                                                     PARAMETERS
+put everything together, the frequency tone collision suppression
+procedure works as follows.
+   First, it uses a limited number of features to identify sym-
+bols without decoding ambiguity, as explained in Section V-A,
+“Partial Matching” (page 7). A symbol can be decoded in the
+”Partial Matching” module if there is exactly one frequency bin
+whose CFO and STO match the estimated CFO and STO of                               Specifically, a small ρδ suppresses noise better, but takes
+the packet. Once a set of unambiguous symbols is decoded, the                   longer time to adapt to the time-varying offsets. Thus, a high
+phase and amplitude of these symbols are computed and treated                   SNR packet requires a higher ρδ , while a low SNR packet shows
+as a subset of the channel state for the packet. This subset is then            better performance with a lower ρδ .
+input into a Bi-LSTM, which estimates the channel state for the                    To study the most appropriate value of ρτ , we collect ten SF10
+entire packet.                                                                  packets from ten different nodes with an average SNR = 50 dB.
+   The decoder leverages the estimated channel state to suppress                The offset values from the packets are used as benchmarks.
+frequency tone collisions. As illustrated in Fig 9 and 10 (page                 Gaussian noise is manually added to the packets to manipulate
+12), the channel state estimation error remains below 15%,                      their SNR. According to Fig. 15 in the evaluations, the partial
+even for low-SNR packets, when only 40% of the symbols are                      matching procedure can successfully matches 40% or more
+decoded via the “Partial Matching” module. This two-stage de-                   symbols. Therefore, we randomly select 40% of the symbols,
+coding process, combined with the Bi-LSTM approach, provides                    and use them to predict the offsets of the rest symbols with
+a robust mechanism for mitigating frequency tone interference.                  the low pass filters introduced in Section V-A. Fig. 9 plots the
+   Additionally, interference suppression is employed only when                 average and the 95th percentile CFO and STO estimation error
+the gateway is unable to decode the packet during the “Full                     for packets with SNR = 10 dB, 0 dB and −10 dB respectively.
+Matching” procedure, as discussed in Section V-D. The rationale                    Based on the figure, the optimal ρδ and ρτ are determined as
+is as follows: Since fine-grained offsets are fully compensated                 the ones with the lowest average estimation errors. Moreover, Γδ
+before the full matching process, the inability to match a symbol               and Γτ are set to tolerate the 95th percentile estimation error. In
+to any frequency bin suggests a strong collision has occurred,                  this case, a collision free symbol can be correctly identified by
+resulting in significant corruption of the features carried by                  the offsets (STO and CFO) from both antennas with probability
+the frequency bin. In such scenarios, spatial multiplexing is                   higher than 80% (≈ 0.954 , with dimension size = 4, which
+utilized to resolve the collision and facilitate the decoding of the            includes CFO and STO from two antennas). Their values are
+symbol.                                                                         shown in Table II.
+                                                                                   Regarding the Bi-LSTM network, an initial dataset of 1000
+                                                                                packets is compiled from diverse locations, and their channel
+F. Parameter Selections                                                         state is calculated symbol by symbol. Data augmentation is
+   We next show how to determine the exact value of the                         applied to create additional packets with varying noise levels.
+parameters discussed in both partial and complete matching.                     Specifically, 60% of symbols are randomly chosen and labeled
+Different packets with different SNR experience different degree                as unpaired symbols. The channel state of the remaining symbols
+of collisions and decoding ambiguities. Therefore, they should                  is then fed into the Bi-LSTM network to train its parameters.
+be assigned with different thresholds (i.e., Γδ , Γτ ) and update                  Fig. 10(a) demonstrates the average and the maximum am-
+parameters (i.e., ρδ , and ρτ ). We categorize a SF10 packet as                 plitude and phase deviation when 60% of the channel state
+a low, medium or high SNR packet if its average SNR satisfies                   information is missing. Note that, in real evaluations (refer to
+≤ 0 dB, 0 dB ≤ SN R ≤ 10dB, and ≥ 10 dB . For SF8 pack-                         Fig. 15 in the evaluations, Section V), partial matching module
+ets, we add a 6 dB additional SNR margin when categorizing                      is able to pair more than 40% of symbols. We therefore, set the
+SF8 packets as they have 6 dB less processing gain than SF10                    average deviation with 60% symbol loss as the threshold for the
+packets. In other words, a SF8 packet with SNR>16 dB, or                        complete matching in Section V-D. Similarly, the average and
+SNR<-4 dB is assumed to be a high or low SNR packet.                            maximum deviation for CFO and STO when 60% of the symbols
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3532                                                                                 IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+                                                                                 for every received block of bits. The preamble length is eight
+                                                                                 symbols. Two Sync words and 2.25 SFD follow the preamble.
+                                                                                    According to [20], with the above setting, the packet length
+                                                                                 is 46.25 and 38.25 symbols for SF8 and SF10 respectively.
+                                                                                 The packet duration is 47.4 ms and 156.7 ms. The receiver’s
+                                                                                 sampling rate is also set to 250 KHz. The payload of each packet
+                                                                                 is 12 Bytes. To generate high network concurrency, we set the
+                                                                                 packet interval to 60 ms and 15ms for SF8 and SF10 packets
+                                                                                 respectively. Note that this setting is designed for generating the
+Fig. 10. (a). The average and maximum amplitude-phase deviation of the           worst case scenario to test the scalability of the network. In other
+estimated data from the real ones. (b). The average and maximum offsets          words, we use the setting to examine the maximum number of
+deviation from the estimated data.                                               concurrent nodes that a network can support. Moreover, we use
+                                                                                 reverse engineering [18] to manipulate the payload of a packet,
+                                                                                 so that the first symbol denotes the packet ID. With the above
+                                                                                 settings, packets from different transmitters can be traced easily.
+                                                                                    40 LoRa nodes are deployed on campus, as shown in
+                                                                                 Fig. 11(b). Referring to the figure, some LoRa nodes are placed
+                                                                                 inside two buildings. Others are placed along the main roads
+                                                                                 with pedestrians, cars and trucks passing by. When evaluating
+                                                                                 the performance of a n-node network, we randomly turn on n
+                                                                                 nodes. The gateway listens to the channel, and receives data
+                                                                                 when it is turned on. A round of experiment lasts 7 and 22
+                                                                                 seconds with SF8 and SF10 respectively. In this case, each node
+Fig. 11. (a) Devices used for the evaluations. (b). Experimental deployment      transmits about 100 packets. For a given SF, results from three
+of a 40 node network. The map size is 300 m × 230 m. The red pins represent      individual rounds of evaluation are collected.
+LoRa transmitters, and the blue gateway is the receiver.
+
+                                                                                 B. Performance of Hi2 LoRa
+in a packet are missing are shown in Fig. 10(b). The values for                     We studies and compares the performance of Hi2 LoRa to
+each parameter are listed in Table II.                                           Choir [14], CIC [6], PCube [8] and Magnifier [12]. The per-
+   Moreover, in the Complete Matching sub-module, as every                       formance of two versions of Hi2 LoRa are evaluated and pre-
+symbol should be matched with one and only one frequency                         sented here. The first version leverages the collision suppression
+tone, a fixed threshold can not satisfy this condition all the time.             scheme in the conference version of Hi2 LoRa [21]; and the
+We therefore, let the parameter β, β  and Γ̃a be adjustable. In                second version implement the enhanced collision suppression
+particular, we set the initial value of β  and β  be one, and the              scheme mentioned in the previous section.
+initial value of Γ̃a to Γ̃a . If no frequency tone is selected or more             1) Packet Detection and Synchronization Performance: We
+than one frequency tone satisfies the above conditions, we adjust                first analyze the Packet Detection and Synchronization Rate
+the threshold as discussed previously.                                           (PDSR) for various schemes with SF8 and SF10 packets, re-
+                                                                                 spectively. Here PDSR refers to the percentage of packets being
+                          VI. EVALUATIONS                                        detected and synchronized correctly. Note that, a packet can be
+                                                                                 received correctly only if it is detected, and the first symbol of the
+A. Experimental Settings
+                                                                                 payload is successfully identified. In addition, PDSR is evaluated
+   Commodity LoRa chips SX1278 [20] are used as the trans-                       with coarse-grained synchronization as coarse-grained synchro-
+mitters. A USRP B210 equipped with two antennas is employed                      nization is enough for detecting a packet.
+as a LoRa gateway to decode concurrent packets. The hardware                        Fig. 12 shows the PDSR for different schemes using SF8
+testbed is shown in Fig. 11(a). A computer is connected to the                   and SF10 packets. The figure illustrates that both Hi2 LoRa
+USRP to collect raw signals.                                                     and PCube exhibit the highest packet detection rates com-
+   For each transmitter, the transmission power is set to 0 dBm.                 pared to other schemes. Additionally, Hi2 LoRa demonstrates
+The bandwidth is 250 KHz. The central frequency band used for                    a slightly higher detection rate than PCube under increased
+transmitting data is 510 MHz. In this case, two antennas at the                  network concurrency. This is because PCube relies on SFD for
+receiver are placed 0.3 meters apart so that the antenna separation              synchronization, which may experience stronger interference
+equals half of the wavelength. In each round of evaluation, all                  from concurrent nodes. Nevertheless, both Hi2 LoRa and PCube
+the nodes transmit data on the same channel and with the same                    detect and synchronize up to 80% of packets when there are 40
+SF. Network performance with different SF (SF8 and SF10) is                      concurrent nodes.
+investigated in different evaluation rounds. The Coding Rate                        The PDSR of Magnifier is slightly lower than that of Hi2 LoRa
+(CR) is 48 . Notably, with CR4/8, one bit error can be recovered                 and PCube, e.g., up to 6.5% lower as the gateway detects
+
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                                 3533
+
+
+
+
+Fig. 12. Packet Detection and Synchronization Rate with different SF. Here         Fig. 14.   Symbol Error Rate (SER) versus the number of concurrent packets.
+”Hi2 ”, ”Mag”, ”PCube”, ”CIC” and ”Choir” stand for the performance of
+Hi2 LoRa with two antennas, Magnifier, PCube, CIC and Choir, respectively.
+                                                                                   more features to validate the correctness of the received symbols,
+                                                                                   thus helps to remove more interfering frequency tones from the
+                                                                                   received signal. Particularly, ”Hi-v2” shows up to 12% and 8.7%
+                                                                                   higher effective throughput compared to that of ”Hi-v1”.
+                                                                                      They also demonstrate significantly higher effective through-
+                                                                                   put than other schemes. For instance, with SF10 packets, the
+                                                                                   effective throughput of ”Hi-v1” and ”Hi-v2” is up to 42.9% and
+                                                                                   50.0%, 140.0% and 152.0%, 566.7% and 600% higher than of
+                                                                                   Magnifier, CIC and Choir, respectively.
+                                                                                      We also observe that the effective throughput does not scale
+Fig. 13. Effective Throughput with different SF. In the figure, ”Hi-v1” and        with the number of concurrent nodes for networks with SF8
+”Hi-v2” refer to the first and the second version of Hi2 LoRa respectively. ”P2”   packets, but drops as network concurrency increases. As to net-
+and ”P8” correspond to the performance of PCube with two and eight antennas,
+respectively.                                                                      works with SF10 packet, if network concurrency keeps growing,
+                                                                                   similar performance degradation is expected. This is due to the
+                                                                                   fact that a packet is assumed to be received correctly only when
+and synchronizes to a transmitter with information from one                        all the data symbol can be correctly received. As a result, a
+single transmitting antenna. For CIC and Choir, the PDSR is                        packet will be dropped even though most of the symbols in it
+significantly lower than that of the three schemes. For instance,                  are correctly received.
+the PDSR of CIC is up to 15.2% and 14.1% lower; and the PDSR                          3) Concurrency Comparison: This part studies the Symbol
+of Choir is up to 22.1% and 21.9% lower than that of Hi2 LoRa for                  Error Rate (SER) performance with different numbers of con-
+networks with SF8 and SF10 packets, respectively. The primary                      current nodes. Fig. 14 shows the average SER of the network
+reason stems from the fact that both schemes simply detect                         with SF8 and SF10 packets. As expected, a lower SF (e.g., SF8)
+the arrival of a new packet by examining the presence of the                       supports fewer concurrent packets than a larger SF (e.g., SF10).
+preamble, without efficiently leveraging the features associated                   The reason is that the lower the SF, the lower the frequency
+with the preamble symbols to combat interference, as a result,                     resolution, and the higher frequency tone collisions each packet
+these schemes suffers more from co-channel interference caused                     suffers.
+by other concurrent packets.                                                          In particular, for networks with SF8 packets, to keep SER≤
+   2) Effective Throughput Performance: We next study the                          0.2 , the maximum number of concurrent nodes reaches 20in
+effective throughput of various schemes. Specifically, the ef-                     PCube with eight antennas and both versions of Hi2 LoRa ; 10 in
+fective throughput is calculated as the number of correctly                        PCude with two antennas, 5 in CIC and 2 in Choir. For networks
+received packet per second times the PHY layer payload size                        with SF10 packets, the number of concurrent nodes approaches
+of these packets. The number of transmitting nodes in the                          40in PCube with eight antennas and Hi2 LoRa ; 15 in PCude
+system increases from 5 to 40. Recall that in networks with                        with two antennas, 10 in CIC and 3in Choir. The excellent per-
+40 nodes configured to transmit SF8 packets, there are on                          formance of Hi2 LoRa reveals its ability to 1) identify different
+average 18 concurrent packets as duty cycle of each node is 0.44                   packets with sufficient features; and 2) suppress most frequency
+(47.4 ms/(47.4 + 60) ms). For 40 nodes with SF10 packets,                          tone collisions with only two receiving antennas.
+the average number of concurrent transmitters is 37 with duty                         4) Complexity Comparison: Since the performance trends
+cycle 0.91 (156.7.4 ms/(156.7 + 15) ms). Here, the duty cycle                      for SF8 and SF10 packets are similar, we only discuss network
+is set to a higher value than a normal LoRa node (e.g., usually                    performance with SF10 packets in the rest of the paper. To
+configured with duchy cycle equal to less then 1%). The high                       analyze and compare the complexity of various schemes, we
+duty cycle is used to exam the maximum concurrency a network                       run them on a computer with 2,4, and 8 concurrent packets. The
+can support.                                                                       decoding time is normalized to a standard LoRa decoder. Fig. 15
+   Fig. 13 shows the effective throughput of the network with                      shows the normalized decoding complexity.
+different concurrency. The figure implies that both versions of                       As implied in the figure, the enhanced version of Hi2 LoRa
+Hi2 LoRa achieve comparable performance to PCube with eight                        achieves a 20% to 35% reduction in computation time compared
+antennas. The enhanced version of Hi2 LoRa (denoted by ”Hi-                        to the original, by efficiently excluding interfering frequency
+v2”) shows slightly higher throughput performance as it extracts                   tones (typically side-lobes from other packets) at an earlier stage.
+           Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3534                                                                                   IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+                                                                                   are larger than those of medium and high SNR packets, leading
+                                                                                   to higher decoding ambiguity, and higher SER. In this case, ef-
+                                                                                   ficient complete matching and collision suppression algorithms
+                                                                                   are crucial to resolve the decoding ambiguity. Refer to Fig. 16,
+                                                                                   with Partial-Matching, the SER of 80% of the packets is lower
+                                                                                   than 0.61, and this value is reduced to 0.48, 0.38 and 0.31
+                                                                                   when performing Complete-Matching without collision sup-
+                                                                                   pression and with suppression algorithm v1 and v2, respectively.
+Fig. 15.   Complexity Comparison for various scheme with SF = 10.                  Compared to the partial-matching module, on average the SER
+                                                                                   improvements of Complete-Matching without and with collision
+                                                                                   suppression v1 and v2 is 32.0% 60.1% and 70.6%, respectively.
+                                                                                   Overall, low SNR packets benefit the most from Hi2 LoRa, as
+                                                                                   they are more susceptible to both noise and interference.
+                                                                                      For medium SNR packets, the SER of 80% of the packets
+                                                                                   is lower than 0.40, 0.31, 0.20 and 0.155 for Partial-Matching,
+                                                                                   Complete-Matching without collision suppression, and with
+                                                                                   suppression algorithm v1 and v2, respectively. Compared to
+                                                                                   Partial-Matching module, the average SER improvement after
+Fig. 16. Symbol Error Rate distributions after different modules. Here SF=10.
+The legend ”Partial-Matching” represents the CDF of SER after the Partial-
+                                                                                   Complete-Matching without collision suppression and with col-
+Matching module. ”Complete-wo-IS”, ”Complete-v1”, and ”Complete-v2” re-            lision suppression v1-and v2 is 20.4% and 33.8%, and 39.0%,
+fer to the CDF of SER after the Complete-Matching module without and with          respectively.
+both versions of collision suppression algorithms, respectively.
+                                                                                      As to high SNR packets, the small thresholds reduce decoding
+                                                                                   ambiguity. Therefore, collision suppression plays a more pivotal
+                                                                                   role in decoding a packet. In particular, the SER of 80% of
+This eliminates the need to extract fine-grained offset informa-                   the packets is lower than 0.091, 0.082, 0.017 and 0.009 for
+tion from these interfering tones, saving additional processing                    Partial-Matching, Complete-Matching without collision sup-
+time. Moreover, the complexity of both version of Hi2 LoRa is                      pression, and with collision suppression v1-and v2, respectively.
+higher than that of PCube with two antennas. However, it is                        Moreover, all high SNR packets can be received with SER lower
+comparable to PCube with eight antennas, CIC and Choir. We                         than 4.5% when processed by the Complete-Matching module
+argue that the complexity of Hi2 LoRa is not a problem as the                      with collision suppression.
+decoder is implemented in a gateway with sufficient computing
+resources and power supplies. Moreover, it usually has easy                                                 VII. RELATED WORKS
+access to a powerful edge cloud that can help run the decoder.
+   Note that there is no additional energy consumption in-                         A. Distributed MIMO
+troduced for each LoRa transmitter. The energy consumption                            Multiple receiving antennas receive concurrently packets
+associated with sending a packet from a transmitter, whether                       from different senders and form a distributed MIMO system.
+in Hi2 LoRa or most existing methods, remains equivalent to                        Distributed MIMO has been extensively studied in LTE, Wi-Fi,
+that of a standard LoRa radio. Furthermore, since gateways                         mesh networks and IoT systems [15], [16], [22], [23]. Since
+generally have access to ample power supply, rendering energy                      they require complicated channel estimation and joint decoding
+consumption a non-limiting factor. We thus believe that energy                     for all the transmitters, such approaches incur prohibitively
+consumption is not a critical concern in our proposed scheme.                      high implementation complexity when applying to LoRaWAN.
+   5) Performance Improvement of Different Modules: The per-                       Moreover, all the schemes do not integrate the characteristics
+formance of packets passing through different modules is exam-                     of CSS, hence are inefficient in LoRa concurrent decoding.
+ined here. We investigate performance improvements for packets                     PCube [8] inspects the channel differences between antennas
+with different SNRs here. The packets are first categorized into                   for parallel decoding. To get satisfactory performances, up to
+low (with -10 dB ≤SNR ≤ 0 dB), medium (with 0 dB≤ SNR≤                             eight antennas are needed, rendering an expensive solution.
+10 dB) and high (with SNR≥ 10 dB) SNR packets. According to
+the topology, there are 25%, 50%, and 25% of low, medium, and
+high SNR packets. Fig. 16 plots the CDF of a packet’s SER af-                      B. Concurrent Reception in LoRaWAN
+ter signals processed via Partial-Matching, Complete-Matching                         1) MAC Layer Approaches for Collision Avoidance: Exten-
+without collision suppression (denoted by ”Complete-wo-IS”),                       sive work has studied how to avoid packet collisions in Lo-
+and Complete-Matching with two versions of collision suppres-                      RaWAN [24]. Prior work [25], [26], [27], [28] set different
+sion schemes (denoted by ”Complete-v1” and ”Complete-v2”).                         SF, bandwidth, and time slots for different users to eliminate
+According to the figure, after Complete-Matching with collision                    transmission collisions. LMAC [29] and prior work [30] propose
+suppression, the SER is improved significantly.                                    to detect preamble chirp to achieve reliable carrier sense based
+   Specifically, for low SNR packets, the thresholds for identi-                   on the Channel Activity Detection (CAD) mechanism in LoRa
+fying symbols such as Γδ , Γφ , Γτ , and Γa (listed in Table II)                   radios. Still, implementing CAD requires additional firmware
+
+           Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+CHEN et al.: ENABLING LARGE SCALE LoRa PARALLEL DECODING WITH HIGH-DIMENSIONAL AND HIGH-ACCURACY FEATURES                                                  3535
+
+
+
+changes. Besides, the MAC layer approaches cannot wholly                        channel state information inherent to each transceiver for packet
+resolve collisions as long as the transmitters are far from each                identification. The accuracy of the high dimensional features
+other and thus cannot sense the transmissions from others.                      is achieved by a two-stage matching algorithm discussed in
+   2) PHY Layer Solutions for Concurrent LoRa Reception:                        Hi2 LoRa, as well as its ability to suppress frequency tone colli-
+Choir [14] ignores the existence of STO and SFO, and assumes                    sions. The extensive results demonstrate that Hi2 LoRa achieves
+a steady CFO for the entire packet. However, the location of the                a good implementation complexity and performance trade-off.
+frequency peak (assumed to be the CFO of a packet) changes                      For instance, it either shows comparable concurrency to that
+with time due to SFO. Assuming a fixed frequency drift makes                    of PCube with eight antennas or achieves 2.7× of concur-
+the receiver quickly lose track of the actual location of the                   rency compared to PCube with the same number of antennas
+peak, resulting in packet reception failure. Regarding CIC [6],                 (e.g., two antennas). Additionally, Hi2 LoRa provides up to
+it employs the frequency drift and the time misalignment be-                    3.5× higher concurrency than most state-of-the-art work such
+tween different packets. Similar to Choir, as the extracted CFO                 as CIC [6] with one antenna. Hi2 LoRa can also be extended
+is inaccurate, CIC’s performance degrades significantly when                    to resolve non-orthogonal concurrent packet receptions. For
+network concurrency increases. Magnifier [12] proposes to use                   instance, receive concurrently transmitted packets with SF6
+the CFO, STO and SFO for parallel decoding in LoRaWAN.                          bandwidth=125 MHz; SF8 bandwidth = 250 MHz; and SF10,
+However, as Magnifier only uses one receiving antenna, the                      bandwidth = 500 MHz. In future work, the authors plan to
+dimension of its features is limited. Moreover, the single antenna              explore efficient collision suppression schemes with massive
+system in Magnifier is not able to suppress frequency tone                      receiving antennas to further extend network concurrency.
+collisions. As a consequence, the number of concurrent trans-
+mitters Magnifier can support is significantly lower than that of
+Hi2 LoRa.                                                                                                         REFERENCES
+   By ignoring all the offsets, FTrack [5], CoLoRa [7],
+SCLora [9], NScale [10], OTC [31], Pyramid [11], and Align-                      [1] V. N. I. Cisco, “Cisco annual internet report (2018–2023),” White Paper,
+                                                                                     pp. 1–35, 2018.
+Track [32] exploit the fact that different packets arrive at the                 [2] LoRa Alliance, “LoRaWAN link layer specification v1.0.4,”
+receiver at different time. FTrack [5] leverages the frequency                       2021. Accessed: Dec. 19, 2024. [Online]. Available: https://lora-
+continuity for parallel decoding. OTC [31] introduces an online                      alliance.org/wp-content/uploads/2021/11/LoRaWAN-Link-Layer-
+                                                                                     Specification-v1.0.4.pdf
+algorithm to process concurrent packet with the packet arrival                   [3] J. C. Liando, A. Gamage, A. W. Tengourtius, and M. Li, “Known and
+time misalignment information. Besides the different arrival                         unknown facts of LoRa: Experiences from a large-scale measurement
+times, Pyramid [11], AlignTrack [32], and SCLora [9] further                         study,” ACM Trans. Sensor Netw., vol. 15, no. 2, pp. 1–35, 2019.
+                                                                                 [4] C. Goursaud and J.-M. Gorce, “Dedicated networks for IoT: PHY/MAC
+adopt the average energy of each packet for parallel decoding.                       state of the art and challenges,” EAI Endorsed Trans. Internet Things,
+Linear scaling is applied to scale different chips in CoLoRa [7].                    vol. 1, 2015, Art. no. 150597.
+The energy distributions of the scaled frequency bins in two                     [5] X. Xia, Y. Zheng, and T. Gu, “FTrack: Parallel decoding for LoRa
+                                                                                     transmissions,” ACM/IEEE Trans. Netw., vol. 28, no. 6, pp. 2573–2586,
+successive symbols are examined to map frequency bins to                             2020.
+packets. With limited number of inaccurate features, and the lack                [6] M. O. Shahid, M. Philipose, K. Chintalapudi, S. Banerjee, and B. Krish-
+of an efficient strategy for suppressing frequency tone collisions,                  naswamy, “Concurrent interference cancellation: Decoding multi-packet
+                                                                                     collisions in LoRa,” in Proc. Conf. ACM Special Int. Group Data Commun.,
+the above schemes can only be applied to low concurrency                             2021, pp. 503–515.
+networks.                                                                        [7] S. Tong, Z. Xu, and J. Wang, “CoLoRa: Enabling multi-packet reception
+   Successive Interference Cancellation (SIC) is discussed in                        in LoRa,” in Proc. IEEE Conf. Comput. Commun., 2020, pp. 1–9.
+                                                                                 [8] X. Xia, N. Hou, Y. Zheng, and T. Gu, “PCube: Scaling LoRa concurrent
+mLora [33] for jointly decoding multiple packets. Unfortunately,                     transmissions with reception diversities,” in Proc. Proc. 27th Annu. Int.
+neglecting the offset impacts on the received signal leads to sub-                   Conf. Mobile Comput. Netw., 2021, pp. 670–683.
+stantial decoding errors. According to [33], mLora can support                   [9] B. Hu, Z. Yin, S. Wang, Z. Xu, and T. He, “SCLoRa: Leveraging multi-
+                                                                                     dimensionality in decoding collided LoRa transmissions,” in Proc. IEEE
+two to three concurrent transmissions, which shows significantly                     28th Int. Conf. Netw. Protoc., 2020, pp. 1–11.
+lower efficiency than Hi2 LoRa.                                                 [10] S. Tong, J. Wang, and Y. Liu, “Combating packet collisions using non-
+   NScale [10] and CurvingLoRa [34] leverage non-linear                              stationary signal scaling in LPWANs,” in Proc. Proc. 18th Int. Conf. Mobile
+                                                                                     Syst., Appl., Serv., 2020, pp. 234–246.
+scalings for separating concurrent packets. Extensive hardware                  [11] X. Zhenqiang, X. Pengjin, and W. Jiliang, “Pyramid: Real-time LoRa
+modifications are needed as non-linear scaling changes the mod-                      collision decoding with peak tracking,” in Proc. IEEE Conf. Comput.
+ulation of all the LoRa nodes. Netscatter [35] and P2 LoRa [36]                      Commun., 2021, pp. 1–9.
+                                                                                [12] W. Chen, S. Wang, and T. He, “Magnifier: Leveraging the fine-grained
+enables large-scale concurrent transmissions with backscatter                        hardware information and their temporal patterns for concurrent LoRa
+devices. The schemes only work for short-range communica-                            decoding,” IEEE Trans. Mobile Comput., vol. 23, no. 5, pp. 4362–4375,
+tions due to the devices’ extremely low energy. It also requires                     May 2024.
+                                                                                [13] A. Springer, W. Gugler, M. Huemer, L. Reindl, C. Ruppel, and R.
+strict synchronization of all transmitters, which is unsuitable for                  Weigel, “Spread spectrum communications using chirp signals,” in Proc.
+distributed implementation.                                                          IEEE/AFCEA EUROCOMM Inf. Syst. Enhanced Public Saf. Secur., 2000,
+                                                                                     pp. 166–170.
+                                                                                [14] R. Eletreby, D. Zhang, S. Kumar, and O. Yağan, “Empowering low-power
+                                                                                     wide area networks in urban settings,” in Proc. Conf. ACM Special Int.
+                         VIII. CONCLUSION                                            Group Data Commun., 2017, pp. 309–321.
+  This work proposes Hi2 LoRa, a framework that utilizes highly                 [15] B. Horia, R. VladM. RyanP. AntoniosKonstantinos, and C. Giuseppe,
+                                                                                     “AirSync: Enabling distributed multiuser MIMO with full spatial mul-
+dimensional and highly accurate features for LoRa concurrent                         tiplexing,” ACM/IEEE Trans. Netw., vol. 21, no. 6, pp. 1681–1695,
+decoding. Hi2 LoRa leverages both hardware imperfections and                         2013.
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+3536                                                                                   IEEE TRANSACTIONS ON MOBILE COMPUTING, VOL. 24, NO. 5, MAY 2025
+
+
+
+[16] B. Apurv, C. Yi-Chao, Q. Lili, and N. George, “Embracing distributed                                     Xianjin Xia (Member, IEEE) received the BS, MSc
+     MIMO in wireless mesh networks,” in Proc. IEEE 23th Int. Conf. Netw.                                     and PhD degrees in computer science from North-
+     Protoc., 2015, pp. 66–77.                                                                                western Polytechnical University, Xi’an, China, in
+[17] LoRa Alliance, “LoRaWAN specification v1.0.3,” 2018, Accessed:                                           2010, 2013, and 2018, respectively. He is currently
+     Sep. 22, 2021. [Online]. Available: https://lora-alliance.org/resource-hub/                              a research assistant professor (RAP) with the De-
+     lorawan-specification-v103                                                                               partment of Computing, the Hong Kong Polytechnic
+[18] Z. Zhang, W. Chen, J. Wang, S. Wang, and T. He, “CONST: Exploiting                                       University. His research interests include the Internet
+     spatial-temporal correlation for multi-gateway based reliable LoRa recep-                                of Things, low-power wide-area network, wireless
+     tion,” in Proc. IEEE 30th Int. Conf. Netw. Protoc., 2022, pp. 1–11.                                      localization and tracking, and mobile computing. He
+[19] E. Hoyer and R. Stork, “The zoom FFT using complex modulation,” in                                       is a member of ACM.
+     Proc. IEEE Int. Conf. Acoustics, Speech, Signal Process., 1977, pp. 78–81.
+[20] SX1276, LoRa, “77/78/79 datasheet, rev. 4,” Semtech, Mar. 2015.
+                                                                                                              Shuai Wang received the BS and MS degrees from
+[21] W. Chen, S. Wang, T. He, and X. Xia, “Hi 2 LoRa: Exploring highly
+                                                                                                              the Huazhong University of Science and Technology,
+     dimensional and highly accurate features to push LoRaWAN concurrency
+                                                                                                              China, and the PhD degree from the Department of
+     limits with low implementation cost,” in Proc. IEEE 31st Int. Conf. Netw.                                Computer Science and Engineering, University of
+     Protoc., 2023, pp. 1–11.
+                                                                                                              Minnesota, in 2017. He is currently a professor and
+[22] Z. Shangqing, Q. Zhe, L. Zhengping, L. Zhuo, and L. Yao, “Comb decoding
+                                                                                                              department head with the Department of Computer
+     towards collision-free WiFi,” in Proc. USENIX Symp. Netw. Syst. Des.
+                                                                                                              Engineering, Southeast University. His research in-
+     Implementation, 2020, pp. 1–21.
+                                                                                                              terests include the wireless networks and sensors,
+[23] G. Chuhan, H. Mehrdad, C. Krishna, and P. Bodhi, “Blind distributed MU-
+                                                                                                              cyber-physical systems, and data science.
+     MIMO for IoT networking over VHF narrowband spectrum,” in MobiCom
+     ’19: Proc. 25th Annu. Int. Conf. Mobile Comput. Netw., 2019, pp. 1–17.
+[24] W. Xiao, M. Kaneko, N. El Rachkidy, and A. Guitton, “Integrating
+     LoRa collision decoding and MAC protocols for enabling IoT massive                                        Tian He (Fellow, IEEE) is currently a professor with
+     connectivity,” IEEE Internet Things Mag., vol. 5, no. 3, pp. 166–173,                                     the Department of Computer Science and Engineer-
+     Sep. 2022.                                                                                                ing, University of Minnesota Twin Cities. He is the
+[25] Y. Li, J. Yang, and J. Wang, “DyLoRa: Towards energy efficient dynamic                                    author or coauthor of more than 280 papers in premier
+     LoRa transmission control,” in Proc. IEEE Conf. Comput. Commun., 2020,                                    network journals and conferences with more than
+     pp. 1–9.                                                                                                  22000 citations (H-Index 65). His research interests
+[26] J. Haxhibeqiri, I. Moerman, and J. Hoebeke, “Low overhead scheduling                                      include wireless networks, networked sensing sys-
+     of LoRa transmissions for improved scalability,” IEEE Internet Things J.,                                 tems, cyber–physical systems, real-time embedded
+     vol. 6, no. 2, pp. 3097–3109, Apr. 2018.                                                                  systems, and distributed systems. He was the recipient
+[27] B. Reynders, Q. Wang, P. Tuset-Peiro, X. Vilajosana, and S. Pollin,                                       of the NSF CAREER Award in 2009, the McKnight
+     “Improving reliability and scalability of LoRaWANs through lightweight                                    Land-Grant Chaired Professorship in 2011, the China
+     scheduling,” IEEE Internet Things J., vol. 5, no. 3, pp. 1830–1842,           NSF Outstanding Overseas Young Researcher I and II, in 2012 and 2016, the
+     Jun. 2018.                                                                    George W. Taylor Distinguished Research Award, in 2015, and seven best paper
+[28] F. Benkhelifa, Z. Qin, and J. A. McCann, “User fairness in energy             awards in international conferences, including MobiCom, SenSys, and ICDCS.
+     harvesting-based LoRa networks with imperfect SF orthogonality,” IEEE         He has served a few general/program chair positions in international conferences
+     Trans. Commun., vol. 69, no. 7, pp. 4319–4334, Jul. 2021.                     and on many program committees and also has been an editorial board member
+[29] A. Gamage, J. C. Liando, C. Gu, R. Tan, and M. Li, “LMAC: Efficient           for six international journals. He is an ACM fellow.
+     carrier-sense multiple access for LoRa,” in Proc. Proc. 26th Annu. Int.
+     Conf. Mobile Comput. Netw., 2020, pp. 1–13.
+                                                                                                              Shuai Wang is currently an assistant professor with
+[30] C. Pham and M. Ehsan, “Dense deployment of LoRa networks: Expecta-
+                                                                                                              the School of Computer Science and Engineering at
+     tions and limits of channel activity detection and capture effect for radio
+                                                                                                              Southeast University in China. He is broadly inter-
+     channel access,” Sensors, vol. 21, no. 3, 2021, Art. no. 825.                                            ested in wireless sensing, mobile computing, wireless
+[31] Z. Wang, L. Kong, K. Xu, L. He, K. Wu, and G. Chen, “Online concurrent
+                                                                                                              communication, IoT, and embedded systems for im-
+     transmissions at LoRa gateway,” in Proc. IEEE Conf. Comput. Commun.,
+                                                                                                              proving wireless connectivity. He won the Best Paper
+     2020, pp. 2331–2340.
+                                                                                                              Award at ICDCS 2018.
+[32] C. Qian and W. Jiliang, “AlignTrack: Push the limit of LoRa Collision
+     decoding,” in Proc. IEEE 29th Int. Conf. Netw. Protoc., 2021, pp. 1–11.
+[33] X. Wang, L. Kong, L. He, and G. Chen, “mLoRa: A multi-packet reception
+     protocol in LoRa networks,” in Proc. IEEE 28th Int. Conf. Netw. Protoc.,
+     2019, pp. 1–11.
+[34] C. Li, X. Guo, L. Shangguan, Z. Cao, and K. Jamieson, “Curvin-                                           Gang Liu received the PhD degree in computer
+     gLoRa to boost LoRa network throughput via concurrent transmission,”                                     science from Hunan University, China, in 2021. He
+     in Proc. 19th USENIX Symp. Netw. Syst. Des. Implementation, 2022,                                        conducted his postdoctoral research with Hunan Uni-
+     pp. 879–895.                                                                                             versity from 2021 to 2023 and now holds an associate
+[35] M. Hessar, A. Najafi, and S. Gollakota, “Netscatter: Enabling large-scale                                professor position with Shenzhen Institute for Ad-
+     backscatter networks,” in Proc. USENIX Symp. Netw. Syst. Des. Imple-                                     vanced Study, UESTC. His research focuses mainly
+     mentation, 2019, pp. 271–284.                                                                            on security, high performance computing, cloud com-
+[36] J. Jinyan, X. Zhenqiang, D. Fan, and W. Jiliang, “Long-range ambient                                     puting, and computer system architecture.
+     LoRa backscatter with parallel decoding,” in Proc. Proc. 27th Annu. Int.
+     Conf. Mobile Comput. Netw., 2021, pp. 684–696.
+
+                                                                                                              Caishi Huang received the MPhil and PhD degrees in
+                          Weiwei Chen received the PhD degree from the Hong
+                                                                                                              electronic and computer engineering from the Hong
+                          Kong University of Science and Technology, Hong
+                                                                                                              Kong University of Science and Technology, in 2007
+                          Kong, in 2013. She is now with the Department of
+                                                                                                              and 2012 respectively. He is the associate master
+                          Computer Engineering and Science, Shanghai Uni-
+                                                                                                              with Cheong Kun Lun College and assistant professor
+                          versity. Prior to that, she was with the Department of
+                                                                                                              with the Department of Biomedical Science, Faulty
+                          Computer Science and Engineering, Southeast Uni-
+                                                                                                              of Health Science, University of Macau. His general
+                          versity, China. Her research interests include wire-                                research interests include distributed networks, cel-
+                          less sensing and localization, IoT networking, cross
+                                                                                                              lular and computer networks, multimedia, artificial
+                          technology communications (CTC), and mobile edge
+                                                                                                              intelligence, and Big Data.
+                          computing.
+
+
+
+         Authorized licensed use limited to: Southeast University. Downloaded on March 24,2026 at 15:15:01 UTC from IEEE Xplore. Restrictions apply.
+

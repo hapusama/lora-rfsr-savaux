@@ -1,0 +1,9 @@
+numpy==1.26.4
+scipy
+matplotlib
+--extra-index-url https://download.pytorch.org/whl/cu128 # Adjust to your CUDA version: https://pytorch.org/get-started/locally/
+torch
+scienceplots
+json5
+tqdm
+seaborn

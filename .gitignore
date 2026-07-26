@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and editors
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+*.code-workspace
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary output
+*.log
+tmp/
+temp/
+
+# Raw/derived IQ and array data must stay outside Git.
+*.bin
+*.cfile
+*.sc16
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Dataset layers: keep only documentation, placeholders and manifests.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/results/*
+!data/results/.gitkeep
+
+# Local training artifacts. The three published upstream checkpoints are allowed.
+/checkpoints/
+third_party/rfsr/checkpoints/*
+!third_party/rfsr/checkpoints/model_model0v0_bs5_osf4_ds250_lr0.001_wd1e-05.pth
+!third_party/rfsr/checkpoints/model_model0v0_bs5_osf4_ds250_lr0.001_wd1e-05_int8.pt
+!third_party/rfsr/checkpoints/model_model0v0lopenaltyhl_bs1_osf4_ds250_lr0.0001_wd1e-05_ota_dsf8.pth
+
+# Common generated experiment output under source folders.
+eval/
+results/local/

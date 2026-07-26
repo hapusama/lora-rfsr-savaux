@@ -1,0 +1,2 @@
+capture_id,relative_path,sha256,bytes,dtype,sample_rate_hz,center_frequency_hz,lora_bandwidth_hz,sf,cr,preamble_symbols,sync_word,payload_bytes,crc_enabled,rx_gain_db,condition,pair_id,source_kind,notes
+r001,data/raw/branch4_fixed/low_snr/sf10_bw125_fs250_pre32_sw34_r001.bin,REPLACE_ME,0,complex64,250000,487700000,125000,10,4/7,32,0x34,33,true,20,low_snr,pair001,simultaneous,example row
