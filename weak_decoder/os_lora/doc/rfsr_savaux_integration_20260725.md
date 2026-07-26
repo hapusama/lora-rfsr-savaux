@@ -4,11 +4,11 @@ Date: 2026-07-25
 
 ## 1. Upstream snapshot
 
-The official repository was cloned next to `gr-lora_sdr`:
+The tested upstream source is vendored in the consolidated repository:
 
 ```text
-D:\Desktop\proj\RFSuperResolution
-commit 00c135947f855790f458fdc25ae9533c70d77849
+D:\Desktop\proj\lora-rfsr-savaux\third_party\rfsr
+upstream base 00c135947f855790f458fdc25ae9533c70d77849
 ```
 
 Relevant upstream files:
@@ -25,8 +25,9 @@ RFSuperResolution/
   checkpoints/                two FP32 checkpoints and one INT8 checkpoint
 ```
 
-The checkout is kept separate and unmodified. Weak-decoder uses it through an
-adapter so the upstream revision and checkpoint hash remain explicit.
+Weak-decoder uses the vendored tree through an adapter, while the upstream
+revision and checkpoint hash remain explicit. Local Windows reproduction
+changes are recorded in `third_party/rfsr/UPSTREAM.md`.
 
 ## 2. Data contract
 
@@ -135,7 +136,7 @@ context is cropped after inference.
 
 ## 6. Minimal smoke command
 
-Run from `gr-lora_sdr/weakPacket_decoding` with the isolated environment:
+Run from `lora-rfsr-savaux` with the isolated environment:
 
 ```powershell
 D:\Desktop\proj\.venvs\rfsr\Scripts\python.exe -B -m `
@@ -144,7 +145,6 @@ D:\Desktop\proj\.venvs\rfsr\Scripts\python.exe -B -m `
   --start-low <synchronized-symbol-start> `
   --sf 12 --bw 125000 `
   --gt-bin <clean-ground-truth-bin> `
-  --rfsr-repo D:\Desktop\proj\RFSuperResolution `
   --noise-low-iq <250ksps-noise-only-complex64.cfile> `
   --native-high-iq <independent-1msps-complex64.cfile> `
   --start-high <same-symbol-start-at-1msps> `
