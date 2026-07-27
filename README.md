@@ -19,7 +19,7 @@
 | `noisy_iq/` | IQ 检测和功率分析工具 |
 | `scripts/` | 弱包处理与同步入口 |
 | `data/` | 仅存数据规范和 manifest；大文件不进入 Git |
-| `docs/HANDOFF_20260726.md` | 当前研究结论、阻塞点和下一步 |
+| `docs/HANDOFF_20260727.md` | 当前真实数据采集配置、预训练结果、阻塞点和下一步 |
 | `docs/research/` | 从旧工作区收拢的研究记录 |
 
 原目录 `gr-lora_sdr/weakPacket_decoding` 和 `RFSuperResolution` 均未修改或删除。
@@ -118,7 +118,8 @@ Windows 没有 `rsync` 时可用 `scp`；数据更大时建议对象存储或租
 4. 跑通五臂探针，再扩成 packet/SER/PER 评估。
 5. 只有在数据证明 RFSR 的输入契约或误差模式不适配时，才进入窗口训练、微调或模型改造。
 
-当前研究交接以 `docs/HANDOFF_20260726.md` 为准。
+当前研究交接以 `docs/HANDOFF_20260727.md` 为准；更早的 RF-SR 代码分析和
+LiteNap 失败机制见 `docs/HANDOFF_20260726.md`。
 
 ## 许可证与来源
 

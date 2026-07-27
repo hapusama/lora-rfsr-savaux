@@ -54,3 +54,50 @@ After upload, compute the hash again. Keep the raw file immutable and generate
 derived artifacts under `processed/`.
 
 See `manifests/example.csv` for the minimum recommended fields.
+
+## Ideal PHY references
+
+Generate ideal references from the complete 33-byte STM32 `[TX Frame]`
+records, not from the 20-byte application payload:
+
+```powershell
+python tools/generate_reference_phy.py `
+  --uart-log data/raw/packet_reference.txt `
+  --output-root D:\rfsr_db `
+  --limit 2
+```
+
+The smoke-test command writes:
+
+```text
+rfsr_db/
+├── reference/
+│   ├── signalout_000000_fulltrim.cfile
+│   └── signalout_000001_fulltrim.cfile
+└── metadata/
+    ├── 000000.json
+    └── 000001.json
+```
+
+Inspect and align those first two references against high-SNR OTA IQ before
+running the command without `--limit`. The generator emits 1 MS/s little-endian
+`complex64` by default, adds the standard explicit PHY header and the
+SX1276-air CRC convention already validated by this workspace's receiver
+(`crc_mode=grlora`), and deliberately does not add the upstream RF-SR private
+four-byte application header, artificial CFO, AWGN, or channel effects. It
+prepends 10,000 zero samples and no trailing zeros to match RF-SR
+`PHY.encode()`; pass `--leading-silence-samples 0` only when a packet-only
+waveform is required. The alternative full-payload CRC-16 comparison mode is
+not used for this STM32 dataset.
+
+Plot every preamble/sync/SFD/header/payload symbol as an independent STFT
+panel:
+
+```powershell
+python tools/plot_reference_phy_stft.py `
+  --input D:\rfsr_db\reference\signalout_000000_fulltrim.cfile
+```
+
+Use repeated `--section` options for a smaller plot set, for example
+`--section header --section payload`. The script reads the paired metadata
+automatically and writes paginated PNG files under `D:\rfsr_db\stft\`.

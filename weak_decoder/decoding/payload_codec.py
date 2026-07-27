@@ -334,6 +334,40 @@ def encode_explicit_frame_symbols(
       symbol_value 序列。Phase-MAP 会拿 payload_symbols 去真实 FFT 证据里
       查对应 bin 的相位/幅度，从而给这个 byte 候选打分。
     """
+    header_modulator, payload_modulator = encode_explicit_frame_modulator_symbols(
+        payload,
+        sf=int(sf),
+        cr=int(cr),
+        has_crc=bool(has_crc),
+        ldro=bool(ldro),
+        crc_mode=str(crc_mode),
+    )
+    modulator_symbols = header_modulator + payload_modulator
+    n_bins = 1 << int(sf)
+    demod_symbols = [
+        ((int(raw_bin) - 1) % n_bins) // (4 if idx < 8 or bool(ldro) else 1)
+        for idx, raw_bin in enumerate(modulator_symbols)
+    ]
+    return demod_symbols[:8], demod_symbols[8:]
+
+
+def encode_explicit_frame_modulator_symbols(
+    payload: bytes | bytearray | Sequence[int],
+    sf: int,
+    cr: int,
+    has_crc: bool,
+    ldro: bool,
+    crc_mode: str = "grlora",
+) -> tuple[list[int], list[int]]:
+    """把 raw PHY payload 编码成 LoRa 调制器直接使用的 symbol IDs。
+
+    与 :func:`encode_explicit_frame_symbols` 不同，本函数不把调制器 symbol
+    换算成本地接收机记录的 reduced-rate ``symbol_value``。返回值可以直接
+    交给 LoRa upchirp 调制器生成 IQ。
+
+    ``payload`` 已经是完整 PHY payload；本函数不会添加 DST/SRC/SEQ/LENGTH
+    等应用层私有头。PHY explicit header 和可选 PHY CRC 仍按 LoRa 规则生成。
+    """
     payload_bytes = bytes(int(v) & 0xFF for v in payload)
 
     # 1) 先构造 PHY header nibbles，再拼接 whitened payload nibbles。
@@ -360,11 +394,7 @@ def encode_explicit_frame_symbols(
         ldro=bool(ldro),
         frame_len_nibbles=len(nibbles),
     )
-    symbols = interleaved_to_fft_demod_symbols(
-        interleaved,
-        sf=int(sf),
-        ldro=bool(ldro),
-    )
+    symbols = gray_demap_symbols(interleaved, sf=int(sf))
     return symbols[:8], symbols[8:]
 
 

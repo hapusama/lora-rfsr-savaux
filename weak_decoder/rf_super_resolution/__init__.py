@@ -8,6 +8,16 @@ from .frontend import (
     RFSuperResolutionFrontend,
     default_rfsr_repo_root,
 )
+from .reference_phy import (
+    EncodedReference,
+    ReferencePhyConfig,
+    UartPacketRecord,
+    UartReferenceLog,
+    encode_reference_phy,
+    parse_uart_reference_log,
+    phy_config_from_uart,
+    write_reference_packet,
+)
 
 __all__ = [
     "DEFAULT_OTA_CHECKPOINT",
@@ -15,5 +25,13 @@ __all__ = [
     "RFSRFrontendConfig",
     "RFSRProvenance",
     "RFSuperResolutionFrontend",
+    "EncodedReference",
+    "ReferencePhyConfig",
+    "UartPacketRecord",
+    "UartReferenceLog",
     "default_rfsr_repo_root",
+    "encode_reference_phy",
+    "parse_uart_reference_log",
+    "phy_config_from_uart",
+    "write_reference_packet",
 ]
