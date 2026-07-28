@@ -240,17 +240,34 @@ class TrimTest(unittest.TestCase):
                     output_root,
                     reference_mode="copy",
                     compute_capture_hash=False,
+                    detector_start_offset_samples_2m=8,
                 )
                 validation_path = builder.validate_dataset(output_root)
 
             self.assertEqual(len(generated), 2)
             phase0 = np.fromfile(generated[0], dtype=np.dtype("<c8"))
             phase1 = np.fromfile(generated[1], dtype=np.dtype("<c8"))
-            crop = raw[12:44]
+            crop = raw[20:52]
             np.testing.assert_array_equal(phase0, crop[0::2])
             np.testing.assert_array_equal(phase1, crop[1::2])
             self.assertEqual(phase0.size, 16)
             self.assertEqual(phase0[0::4].size, 4)
+
+            metadata = json.loads(
+                (output_root / "metadata" / f"{generated[0].stem}.json").read_text()
+            )
+            self.assertEqual(
+                metadata["trim"]["detected_preamble_start_sample_2m"],
+                20,
+            )
+            self.assertEqual(
+                metadata["trim"]["detector_start_offset_samples_2m"],
+                8,
+            )
+            self.assertEqual(
+                metadata["trim"]["effective_preamble_start_sample_2m"],
+                28,
+            )
 
             views = builder.read_csv(output_root / "manifests" / "views.csv")
             self.assertEqual(len(views), 8)

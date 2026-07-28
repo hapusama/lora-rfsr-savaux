@@ -9,6 +9,7 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "reference_phy"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -35,8 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        required=True,
-        help="输出根目录；脚本会在其下创建 reference/ 和 metadata/。",
+        default=DEFAULT_OUTPUT_ROOT,
+        help=(
+            "输出根目录；脚本会在其下创建 reference/ 和 metadata/，"
+            f"默认：{DEFAULT_OUTPUT_ROOT}。"
+        ),
     )
     parser.add_argument(
         "--sample-rate",

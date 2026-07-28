@@ -119,8 +119,9 @@ raw-frame 的 symbol 编码和 IQ 调制入口位于
 `third_party/rfsr/rfsr/PHY.py::encode_raw_phy()`；生成脚本和预训练共用这一
 实现。训练数据集位于 `third_party/rfsr/rfsr/nn/dataset.py`。默认只读取
 metadata 中来自 `packet_reference.txt` 的 PHY 参数和 33-byte 长度，然后
-在每次取样时随机生成新的 raw payload 和 1 MSPS clean 标签，再按 4 倍抽取
-成 250 kSPS 输入，并只给输入依次添加 STO、CFO 和 AWGN。
+在启动时一次性生成并缓存随机 raw payload、1 MSPS clean 标签和带扰动输入，
+再按 4 倍抽取成 250 kSPS 输入，并只给输入依次添加 STO、CFO 和 AWGN。
+后续每个 epoch 只改变这批固定样本的读取顺序。
 
 ### 从连续 USRP cfile 构建 OTA 数据集
 
@@ -187,8 +188,8 @@ python -B rfsr\nn\nn.py `
   --sto-slope-max-chips-per-symbol 0.05
 ```
 
-这里的 `dataset_size` 是每个 epoch 的随机 payload/噪声样本数；同一个 index
-在下一次访问时也会重新生成 payload。新权重文件名带
+这里的 `dataset_size` 是启动时一次性生成并缓存的随机 payload/噪声样本数；
+后续每个 epoch 只会打乱同一批样本的读取顺序。新权重文件名带
 `_synthref_random`，不会与官方 `PHY.py` 私有头路径的 checkpoint 混用。
 需要复跑官方合成基线时传 `--synthetic-source upstream`。
 
@@ -220,6 +221,57 @@ STO 也只加入输入 `x`。每条样本独立抽取初始 `τ₀` 和逐符号
 
 无论是否启用 STO，高采样率标签 `y` 都保持零 STO；checkpoint 文件名会
 加入 STO 范围或 `_stonone`，避免不同实验互相续训。
+
+### OTA 严格 RF-SR 微调与解码测试
+
+OTA 微调不能把真实接收的低采样 IQ 配到理想发射 reference；那会迫使网络
+消除 CFO、SFO、增益和噪声，既不收敛也不符合 RF-SR 前端职责。默认
+`--ota-target received` 使用同一条 1 MSPS OTA 波形作为标签，低采样输入只是
+它的固定 q 相位抽取。训练数据不做 CFO、SFO、幅度或复增益校正。
+
+以下命令用固定 seed 从物理包中选择 24 个，并按物理包严格划成
+14/5/5（训练/验证/测试）的 6:2:2；同一包的两个 ADC phase 与四个 q phase
+绝不会跨 split。`validation` 只用于早停和选择最佳权重，`test` 不参与训练。
+
+```bash
+cd /root/autodl-tmp/rfsr-run/finetune
+export PYTHONPATH=/root/lora-rfsr-savaux/third_party/rfsr
+
+python -B /root/lora-rfsr-savaux/third_party/rfsr/rfsr/nn/nn.py \
+  --model model0v0hl \
+  --batch_size 1 \
+  --osf 4 --dsf 8 --dataset_size 250 \
+  --num_epochs 100 \
+  --learning_rate 0.0001 --weight_decay 1e-5 --optimizer adam \
+  --ota \
+  --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
+  --ota-target received \
+  --ota-max-groups 24 --ota-split-seed 42 \
+  --early-stop-patience 10 \
+  --pretrained /root/autodl-tmp/rfsr-run/pretrain/checkpoints/model_model0v0_bs5_osf4_ds250_lr0.001_wd1e-05_synthref_random_snr-22to10_cfo0_stonone.pth
+```
+
+要使用全部 OTA 物理包，去掉 `--ota-max-groups 24`。训练完成后，使用
+采集机的 GNU Radio/gr-lora 环境运行以下测试。它会从完整 LoRa 接收链的
+packet detector 开始，比较 250 kSPS 原始输入、作者插值、RFSR 输出与原生
+1 MSPS OTA，并以 metadata 中的完整 frame 和 CRC 统计成功数：
+
+```bash
+conda activate grlora
+cd /root/lora-rfsr-savaux
+export PYTHONPATH=/root/lora-rfsr-savaux/third_party/rfsr
+
+python -B tools/evaluate_rfsr_ota_decode.py \
+  --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
+  --ota-max-groups 24 --ota-split-seed 42 \
+  --checkpoint /root/autodl-tmp/rfsr-run/finetune/checkpoints/model_model0v0hl_bs1_osf4_ds250_lr0.0001_wd1e-05_ota_received_g24_dsf8.pth \
+  --output /root/autodl-tmp/rfsr-run/finetune/ota_decode_test.json \
+  --device cuda
+```
+
+可在上述测试命令加入 `--extra-snr-db -10`，在每个 held-out 高采样包上先加入
+一个固定 seed 的公共 AWGN 实现，再由它抽取低采样输入。该噪声只用于测试，
+不改变训练数据或网络前的同步流程。
 
 ## 3. 数据不要上传进 Git
 

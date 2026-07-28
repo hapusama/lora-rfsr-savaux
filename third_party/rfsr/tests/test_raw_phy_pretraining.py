@@ -342,7 +342,7 @@ class ReferencePhyPretrainingDatasetTest(unittest.TestCase):
             _, _, fixed_snr = fixed[0]
             self.assertAlmostEqual(float(fixed_snr.item()), -15.0)
 
-    def test_random_mode_generates_a_new_clean_payload_per_access(self) -> None:
+    def test_random_mode_caches_initially_generated_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             template = encode_raw_phy(
@@ -362,7 +362,7 @@ class ReferencePhyPretrainingDatasetTest(unittest.TestCase):
             dataset = ReferencePhyPretrainingDataset(
                 root,
                 oversampling=4,
-                size=1,
+                size=2,
                 snr_range=(-10.0, -10.0),
                 expected_sf=7,
                 seed=7,
@@ -371,15 +371,18 @@ class ReferencePhyPretrainingDatasetTest(unittest.TestCase):
             )
 
             first_x, first_y, _ = dataset[0]
-            _, second_y, _ = dataset[0]
+            second_x, second_y, _ = dataset[0]
+            _, other_y, _ = dataset[1]
             self.assertEqual(tuple(first_y.shape), tuple(second_y.shape))
-            self.assertFalse(np.array_equal(first_y.numpy(), second_y.numpy()))
+            np.testing.assert_array_equal(first_x.numpy(), second_x.numpy())
+            np.testing.assert_array_equal(first_y.numpy(), second_y.numpy())
+            self.assertFalse(np.array_equal(first_y.numpy(), other_y.numpy()))
             self.assertEqual(dataset.last_cfo_hz, -1_500.0)
 
             zero_cfo_dataset = ReferencePhyPretrainingDataset(
                 root,
                 oversampling=4,
-                size=1,
+                size=2,
                 snr_range=(-10.0, -10.0),
                 expected_sf=7,
                 seed=7,

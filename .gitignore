@@ -46,6 +46,9 @@ data/processed/*
 !data/processed/.gitkeep
 data/results/*
 !data/results/.gitkeep
+/data/reference_phy/reference
+/data/reference_phy/rfsr_db/ota
+/data/reference_phy/rfsr_db/reference
 
 # Local training artifacts. The three published upstream checkpoints are allowed.
 /checkpoints/

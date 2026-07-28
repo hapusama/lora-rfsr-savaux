@@ -37,7 +37,7 @@ def _read_manifest(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _split_groups(
+def _split_groups_legacy(
     rows: list[dict[str, object]],
     *,
     training: bool,
@@ -67,13 +67,72 @@ def _split_groups(
     ]
 
 
+def _split_groups_622(
+    rows: list[dict[str, object]],
+    *,
+    split: str,
+    seed: int,
+    max_groups: int | None,
+) -> list[dict[str, object]]:
+    """Return a deterministic 60/20/20 split without packet leakage.
+
+    A group identifies one physical transmission, so its ADC and polyphase
+    views must never cross train/validation/test boundaries.
+    """
+
+    if split not in {"train", "validation", "test"}:
+        raise ValueError(
+            "split must be 'train', 'validation', or 'test', got "
+            f"{split!r}."
+        )
+    if max_groups is not None and int(max_groups) < 3:
+        raise ValueError("max_groups must be at least 3 for a 6:2:2 split.")
+
+    groups = sorted({str(row["split_group"]) for row in rows})
+    if not groups:
+        return []
+    shuffled = list(groups)
+    np.random.default_rng(seed).shuffle(shuffled)
+    if max_groups is not None:
+        shuffled = shuffled[: int(max_groups)]
+    if len(shuffled) < 3:
+        raise ValueError("OTA 6:2:2 splitting requires at least 3 groups.")
+
+    validation_count = max(1, int(round(len(shuffled) * 0.2)))
+    test_count = max(1, int(round(len(shuffled) * 0.2)))
+    while validation_count + test_count >= len(shuffled):
+        if validation_count >= test_count:
+            validation_count -= 1
+        else:
+            test_count -= 1
+
+    test_groups = set(shuffled[:test_count])
+    validation_groups = set(
+        shuffled[test_count : test_count + validation_count]
+    )
+    train_groups = set(shuffled[test_count + validation_count :])
+    groups_by_split = {
+        "train": train_groups,
+        "validation": validation_groups,
+        "test": test_groups,
+    }
+    selected_groups = groups_by_split[split]
+    return [
+        row for row in rows if str(row["split_group"]) in selected_groups
+    ]
+
+
 class OTALoRaDataset(Dataset):
-    """Load aligned 250 kS/s input and 1 MS/s reference pairs.
+    """Load aligned 250 kS/s input and 1 MS/s target pairs.
 
     The trim pipeline stores two 1 MS/s ADC phases per physical packet.
     ``views.csv`` exposes four 250 kS/s polyphase views of each stored file.
     All manifest paths are relative to ``dataset_root`` and every physical
-    packet stays wholly in either the train or test split.
+    packet stays wholly in one split. ``target_source='received'`` is the
+    strict RF-SR contract: low-rate and high-rate arrays come from the same
+    received OTA waveform. It intentionally preserves receiver CFO, SFO,
+    gain, noise, and amplitude. ``'reference'`` remains available only for
+    the former received-to-ideal-reference experiment.
     """
 
     def __init__(
@@ -88,12 +147,21 @@ class OTALoRaDataset(Dataset):
         test_split: float = 0.2,
         split_seed: int = 42,
         missing_snr_db: float = 0.0,
+        split: str | None = None,
+        max_groups: int | None = None,
+        target_source: str = "reference",
     ):
         self.return_snr = bool(return_snr)
         self.training = bool(training)
         self.OSF = int(oversampling)
         self.DSF = int(downsampling)
         self.dataset_root = Path(dataset_root).expanduser().resolve()
+        self.target_source = str(target_source)
+        if self.target_source not in {"received", "reference"}:
+            raise ValueError(
+                "target_source must be 'received' or 'reference', got "
+                f"{self.target_source!r}."
+            )
 
         if trim:
             raise ValueError(
@@ -182,6 +250,7 @@ class OTALoRaDataset(Dataset):
                     "split_group": raw["split_group"],
                     "ota_path": ota_path,
                     "reference_path": reference_path,
+                    "adc_phase": int(raw.get("adc_phase_2m", 0)),
                     "lowrate_phase": int(raw["lowrate_phase_1m"]),
                     "stored_samples": stored_samples,
                     "input_samples": input_samples,
@@ -189,21 +258,35 @@ class OTALoRaDataset(Dataset):
                 }
             )
 
-        self.records = _split_groups(
-            records,
-            training=self.training,
-            test_split=float(test_split),
-            seed=int(split_seed),
-        )
+        if split is None:
+            # Preserve the previous two-way API for external callers.
+            self.split = "train" if self.training else "test"
+            self.records = _split_groups_legacy(
+                records,
+                training=self.training,
+                test_split=float(test_split),
+                seed=int(split_seed),
+            )
+        else:
+            self.split = str(split)
+            self.records = _split_groups_622(
+                records,
+                split=self.split,
+                seed=int(split_seed),
+                max_groups=max_groups,
+            )
         self.size = len(self.records)
         if not self.records:
-            split_name = "training" if self.training else "test"
             raise ValueError(
-                f"OTA {split_name} split is empty under {self.dataset_root}."
+                f"OTA {self.split} split is empty under {self.dataset_root}."
             )
+        group_count = len(
+            {str(record["split_group"]) for record in self.records}
+        )
         print(
             f"OTALoRaDataset contains {self.size} manifest views "
-            f"({'train' if self.training else 'test'} split)."
+            f"({self.split} split, {group_count} physical packets, "
+            f"target={self.target_source})."
         )
 
     def __len__(self) -> int:
@@ -214,12 +297,23 @@ class OTALoRaDataset(Dataset):
         ota = np.memmap(
             record["ota_path"], dtype=np.dtype("<c8"), mode="r"
         )
-        reference = np.memmap(
-            record["reference_path"], dtype=np.dtype("<c8"), mode="r"
-        )
         phase = int(record["lowrate_phase"])
         signal = np.asarray(ota[phase::4], dtype=np.complex64)
-        label = np.asarray(reference, dtype=np.complex64)
+        if self.target_source == "received":
+            # x[n] == OTA[phase + 4n]. Shift the high-rate target by the
+            # same phase so output[4n] has the matching received sample.
+            # The short tail has no source samples and is zero-filled.
+            label = np.empty(ota.size, dtype=np.complex64)
+            if phase:
+                label[:-phase] = ota[phase:]
+                label[-phase:] = 0.0
+            else:
+                label[:] = ota
+        else:
+            reference = np.memmap(
+                record["reference_path"], dtype=np.dtype("<c8"), mode="r"
+            )
+            label = np.asarray(reference, dtype=np.complex64)
         if signal.size != int(record["input_samples"]):
             raise ValueError(
                 f"unexpected input length for {record['view_id']}: "
@@ -227,7 +321,7 @@ class OTALoRaDataset(Dataset):
             )
         if label.size != self.OSF * signal.size:
             raise ValueError(
-                f"input/reference length mismatch for {record['view_id']}."
+                f"input/target length mismatch for {record['view_id']}."
             )
 
         x = torch.from_numpy(

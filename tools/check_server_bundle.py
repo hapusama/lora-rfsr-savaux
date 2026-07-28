@@ -7,12 +7,15 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = REPOSITORY_ROOT / "data"
+DATA_ROOT = Path(
+    os.environ.get("LORA_RFSR_DATA_ROOT", REPOSITORY_ROOT / "data")
+).expanduser().resolve()
 DEFAULT_DATASET_ROOT = DATA_ROOT / "reference_phy" / "rfsr_db"
 
 
@@ -37,6 +40,36 @@ def resolve_local(root: Path, value: str) -> Path:
     if not inside(resolved, root):
         raise ValueError(f"runtime manifest path escapes {root}: {value}")
     return resolved
+
+
+def resolve_catalog_provenance(value: str, *, label: str) -> Path:
+    """Resolve an audit-only catalog source path within the data root.
+
+    Runtime views must stay relative to the dataset root.  The catalog also
+    records the original reference and metadata sources, which can be absolute
+    when the configured data root lives outside the code checkout.
+    """
+
+    path = Path(value)
+    if not path.is_absolute():
+        return resolve_local(REPOSITORY_ROOT, value)
+    resolved = path.resolve()
+    if not inside(resolved, DATA_ROOT):
+        raise ValueError(
+            f"{label} must stay inside configured data root {DATA_ROOT}: "
+            f"{value}"
+        )
+    return resolved
+
+
+def display_data_path(path: Path) -> str:
+    """Render a path relative to the configured data root when possible."""
+
+    resolved = path.expanduser().resolve()
+    try:
+        return resolved.relative_to(DATA_ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
 
 
 def discover_capture() -> Path | None:
@@ -86,11 +119,12 @@ def check_base(errors: list[str], dataset_root: Path) -> dict[str, int]:
         add_error(errors, bool(rows), f"empty reference catalog: {catalog_path}")
         for row in rows:
             try:
-                reference = resolve_local(
-                    REPOSITORY_ROOT, row["source_reference_path"]
+                reference = resolve_catalog_provenance(
+                    row["source_reference_path"], label="source_reference_path"
                 )
-                metadata = resolve_local(
-                    REPOSITORY_ROOT, row["reference_metadata_path"]
+                metadata = resolve_catalog_provenance(
+                    row["reference_metadata_path"],
+                    label="reference_metadata_path",
                 )
             except (KeyError, ValueError) as exc:
                 errors.append(f"invalid reference catalog row: {exc}")
@@ -125,7 +159,7 @@ def check_preprocess(
     add_error(
         errors,
         inside(capture, DATA_ROOT),
-        f"capture must be inside this repository's data/: {capture}",
+        f"capture must be inside configured data root {DATA_ROOT}: {capture}",
     )
     add_error(errors, capture.is_file(), f"missing capture: {capture}")
     add_error(
@@ -180,7 +214,7 @@ def check_preprocess(
         f"detections manifest is empty: {detections_path}",
     )
     return {
-        "capture": str(capture.relative_to(REPOSITORY_ROOT)),
+        "capture": display_data_path(capture),
         "capture_bytes": capture.stat().st_size,
         "detections": len(detections),
     }

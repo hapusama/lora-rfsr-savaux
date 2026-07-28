@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import errno
 import gc
 import hashlib
 import math
@@ -42,9 +43,21 @@ def prepare_file_source_path(input_file: Path) -> Path:
     try:
         os.link(source_path, staged_path)
     except OSError as exc:
-        raise RuntimeError(
-            f"failed to create ASCII hardlink for GNU Radio file_source: {source_path}"
-        ) from exc
+        if exc.errno != errno.EXDEV:
+            raise RuntimeError(
+                "failed to create ASCII hardlink for GNU Radio file_source: "
+                f"{source_path}"
+            ) from exc
+        # The experiment data commonly live on /root/autodl-tmp while the
+        # ASCII staging directory is on the repository filesystem. A symlink
+        # preserves the source file and works across those mount points.
+        try:
+            os.symlink(source_path, staged_path)
+        except OSError as symlink_exc:
+            raise RuntimeError(
+                "failed to create ASCII file_source link for GNU Radio: "
+                f"{source_path}"
+            ) from symlink_exc
     return staged_path
 
 
@@ -407,8 +420,24 @@ class GrloraPacketDetector:
                     bool(args.print_header),
                 )
                 self.dewhitening = lora_sdr.dewhitening()
-                crc_mode = lora_sdr.Crc_mode.SX1276 if int(args.crc_mode) == 1 else lora_sdr.Crc_mode.GRLORA
-                self.crc_verif = lora_sdr.crc_verif(0, False, crc_mode)
+                # Older local builds expose the extended Crc_mode API and
+                # publish payload_metadata messages. Current upstream 3.10
+                # instead exposes crc_verif(print_rx_msg, output_crc_check)
+                # and writes decoded bytes/CRC status to two stream outputs.
+                self.current_upstream_crc_api = not hasattr(
+                    lora_sdr, "Crc_mode"
+                )
+                if self.current_upstream_crc_api:
+                    self.crc_verif = lora_sdr.crc_verif(0, True)
+                    self.payload_stream_sink = blocks.vector_sink_b()
+                    self.crc_stream_sink = blocks.vector_sink_b()
+                else:
+                    crc_mode = (
+                        lora_sdr.Crc_mode.SX1276
+                        if int(args.crc_mode) == 1
+                        else lora_sdr.Crc_mode.GRLORA
+                    )
+                    self.crc_verif = lora_sdr.crc_verif(0, False, crc_mode)
                 self.preamble_sink = PreambleMetadataSink()
                 self.header_sink = HeaderMetadataSink()
                 self.payload_sink = PayloadMetadataSink()
@@ -424,17 +453,67 @@ class GrloraPacketDetector:
                 self.connect((self.dewhitening, 0), (self.crc_verif, 0))
                 self.msg_connect((self.header_decoder, "frame_info"), (self.frame_sync, "frame_info"))
                 self.msg_connect((self.header_decoder, "frame_info"), (self.header_sink, "frame_info"))
-                self.msg_connect((self.frame_sync, "preamble"), (self.preamble_sink, "preamble"))
-                self.msg_connect((self.crc_verif, "payload_metadata"), (self.payload_sink, "payload_metadata"))
+                if self.current_upstream_crc_api:
+                    self.connect(
+                        (self.crc_verif, 0), (self.payload_stream_sink, 0)
+                    )
+                    self.connect(
+                        (self.crc_verif, 1), (self.crc_stream_sink, 0)
+                    )
+                else:
+                    self.msg_connect(
+                        (self.frame_sync, "preamble"),
+                        (self.preamble_sink, "preamble"),
+                    )
+                    self.msg_connect(
+                        (self.crc_verif, "payload_metadata"),
+                        (self.payload_sink, "payload_metadata"),
+                    )
 
         file_source_path = prepare_file_source_path(input_path)
         try:
             tb = PacketDetectorTopBlock(file_source_path)
             tb.start()
             tb.wait()
-            frames = list(tb.preamble_sink.frames)
-            headers = list(tb.header_sink.headers)
-            payloads = list(tb.payload_sink.payloads)
+            if tb.current_upstream_crc_api:
+                payload = bytes(tb.payload_stream_sink.data())
+                crc_values = list(tb.crc_stream_sink.data())
+                # Upstream 3.10 does not publish packet timing metadata. This
+                # fallback is intended for one-packet trimmed cfiles, where
+                # the complete stream output is one decoded frame.
+                frames = (
+                    [
+                        {
+                            "frame_count": 0,
+                            "start_sample": 0,
+                            "end_sample": 0,
+                        }
+                    ]
+                    if payload or crc_values
+                    else []
+                )
+                headers = []
+                payloads = (
+                    [
+                        {
+                            "frame_count": 0,
+                            "decoded_payload_len": len(payload),
+                            "decoded_payload_available": True,
+                            "decoded_payload_hex": payload.hex(),
+                            "decoded_payload_text": payload_bytes_to_text(
+                                payload
+                            ),
+                            "crc_valid": bool(crc_values)
+                            and all(int(value) != 0 for value in crc_values),
+                        }
+                    ]
+                    if payload or crc_values
+                    else []
+                )
+            else:
+                frames = list(tb.preamble_sink.frames)
+                headers = list(tb.header_sink.headers)
+                payloads = list(tb.payload_sink.payloads)
         finally:
             # On Windows, file_source keeps the staged hardlink open until the
             # top block is destroyed.  Release it before unlinking so a

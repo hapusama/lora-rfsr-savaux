@@ -134,11 +134,12 @@ class SyntheticLoRaDataset(Dataset):
 class ReferencePhyPretrainingDataset(Dataset):
     """按 reference metadata 的 PHY 配置构造合成预训练数据对。
 
-    默认仅使用 metadata 中的 PHY 参数和 raw frame 长度，每次取样都调用
-    ``PHY.encode_random_raw_phy`` 生成全新的 payload 和 clean 标签 ``y``。
-    ``random_payload=False`` 时才读取已有 cfile，作为固定 payload 对照。
-    两种模式都会按 ``oversampling`` 构造 ``x``，并只给 ``x`` 添加
-    STO、CFO 和 AWGN；高采样率标签 ``y`` 始终保持理想波形。
+    默认仅使用 metadata 中的 PHY 参数和 raw frame 长度，并在初始化时调用
+    ``PHY.encode_random_raw_phy`` 生成 ``size`` 个随机 payload 和 clean
+    标签 ``y``。这些样本随后缓存，后续 epoch 只会重新打乱读取顺序。
+    ``random_payload=False`` 时改为读取已有 cfile，作为固定 payload 对照。
+    两种模式都会按 ``oversampling`` 构造 ``x``，并只给 ``x`` 添加 STO、
+    CFO 和 AWGN；高采样率标签 ``y`` 始终保持理想波形。
     """
 
     def __init__(
@@ -276,6 +277,26 @@ class ReferencePhyPretrainingDataset(Dataset):
         self.raw_phy_config = dict(raw_phy_config or {})
         self.payload_length = int(payload_length or 0)
 
+        # Cache the entire synthetic dataset once. Preallocation avoids a
+        # second full copy that would result from collecting then stacking.
+        self.x_batched = torch.empty(
+            (self.size, 2, self.input_len), dtype=torch.float32
+        )
+        self.y_batched = torch.empty(
+            (self.size, 2, self.output_len), dtype=torch.float32
+        )
+        self.snr_batched = torch.empty(
+            (self.size, 1), dtype=torch.float32
+        )
+        print(f"Dataset size: {self.size}")
+        for index in range(self.size):
+            if index % 10 == 0:
+                print(f"Added: {index} elements")
+            x, y, snr = self._generate_sample(index)
+            self.x_batched[index].copy_(x)
+            self.y_batched[index].copy_(y)
+            self.snr_batched[index].copy_(snr)
+
     @staticmethod
     def _validate_metadata(
         metadata,
@@ -330,6 +351,15 @@ class ReferencePhyPretrainingDataset(Dataset):
         return self.size
 
     def __getitem__(self, idx):
+        if not 0 <= int(idx) < self.size:
+            raise IndexError(idx)
+        return (
+            self.x_batched[idx],
+            self.y_batched[idx],
+            self.snr_batched[idx],
+        )
+
+    def _generate_sample(self, idx):
         if not 0 <= int(idx) < self.size:
             raise IndexError(idx)
 
@@ -580,5 +610,4 @@ class _LegacyUpstreamOTALoRaDataset(Dataset):
 # Public OTA loading is implemented by the repository-local manifest contract.
 # Keep the upstream class above private only as a readable provenance snapshot.
 from .ota_dataset import OTALoRaDataset  # noqa: E402,F401
-
 

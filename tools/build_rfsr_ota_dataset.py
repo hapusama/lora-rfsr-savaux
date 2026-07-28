@@ -29,7 +29,8 @@ data/
 └── ...
 ```
 
-所有持久化输出都被限制在 ``lora-rfsr-savaux/data`` 内。
+所有持久化输出都被限制在配置的数据根目录内；默认是
+``lora-rfsr-savaux/data``。
 """
 
 from __future__ import annotations
@@ -52,7 +53,9 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = (REPO_ROOT / "data").resolve()
+DATA_ROOT = Path(
+    os.environ.get("LORA_RFSR_DATA_ROOT", REPO_ROOT / "data")
+).expanduser().resolve()
 
 # 输入语料与最终数据库的默认位置。reference_phy 是“理想语料”，
 # reference_phy/rfsr_db 是“真实 OTA 与理想语料配对后的训练数据库”。
@@ -186,7 +189,7 @@ def utc_now() -> str:
 
 
 def ensure_inside_data(path: str | Path, *, label: str = "output path") -> Path:
-    """确认持久化路径位于项目 ``data/`` 内，防止输出散落到仓库外。"""
+    """确认持久化路径位于配置的数据根目录内，防止输出散落。"""
 
     resolved = Path(path).expanduser().resolve()
     try:
@@ -1552,6 +1555,7 @@ def trim_packets(
     overwrite: bool = False,
     reference_mode: str = "auto",
     compute_capture_hash: bool = True,
+    detector_start_offset_samples_2m: int = 0,
 ) -> list[Path]:
     """阶段 4：裁剪 accepted packet，并构造 2×4 多相训练视图。
 
@@ -1603,7 +1607,10 @@ def trim_packets(
         # ambiguous/rejected 包保留在审计表中，但绝不裁成训练样本。
         if row.get("status") != "accepted":
             continue
-        start_packet = parse_int(row["start_sample_2m"])
+        detected_start_packet = parse_int(row["start_sample_2m"])
+        start_packet = (
+            detected_start_packet + detector_start_offset_samples_2m
+        )
         trim_start = start_packet - source_leading
         trim_stop = trim_start + source_crop_samples
         if trim_start < 0 or trim_stop > capture.size:
@@ -1704,7 +1711,11 @@ def trim_packets(
                     ),
                 },
                 "trim": {
-                    "detected_preamble_start_sample_2m": start_packet,
+                    "detected_preamble_start_sample_2m": detected_start_packet,
+                    "detector_start_offset_samples_2m": (
+                        detector_start_offset_samples_2m
+                    ),
+                    "effective_preamble_start_sample_2m": start_packet,
                     "start_sample_2m": trim_start,
                     "stop_sample_2m_exclusive": trim_stop,
                     "complex_samples_2m": source_crop_samples,
@@ -1953,7 +1964,7 @@ def add_output_root(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
         help=(
-            "最终 OTA 数据库根目录，必须位于 lora-rfsr-savaux/data 内。"
+            "最终 OTA 数据库根目录，必须位于配置的数据根目录内。"
             f"默认：{DEFAULT_OUTPUT_ROOT}"
         ),
     )
@@ -1969,6 +1980,20 @@ def add_capture(parser: argparse.ArgumentParser) -> None:
         help="规范命名的连续 2 MS/s complex64 .cfile。",
     )
     add_descriptor_arguments(parser)
+
+
+def add_trim_alignment_arguments(parser: argparse.ArgumentParser) -> None:
+    """添加 detector 采样点到物理 preamble 起点的已校准修正。"""
+
+    parser.add_argument(
+        "--detector-start-offset-samples-2m",
+        type=int,
+        default=0,
+        help=(
+            "加到 detector start_sample_2m 的校准偏移。当前 SF12/2 MS/s "
+            "采集经波形复核需要 2048；默认 0 保持未知采集的原始检测位置。"
+        ),
+    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -2071,6 +2096,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     add_capture(trim_parser)
     add_output_root(trim_parser)
+    add_trim_alignment_arguments(trim_parser)
     trim_parser.add_argument(
         "--catalog", type=Path, help="reference_catalog.csv；默认自动定位。"
     )
@@ -2105,6 +2131,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     add_capture(all_parser)
     add_output_root(all_parser)
+    add_trim_alignment_arguments(all_parser)
     all_parser.add_argument(
         "--uart-log", type=Path, default=DEFAULT_UART_LOG,
         help="STM32 串口 ground truth。",
@@ -2149,6 +2176,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     add_capture(server_parser)
     add_output_root(server_parser)
+    add_trim_alignment_arguments(server_parser)
     server_parser.add_argument(
         "--uart-log", type=Path, default=DEFAULT_UART_LOG,
         help="STM32 串口 ground truth。",
@@ -2284,6 +2312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=args.overwrite,
             reference_mode=args.reference_mode,
             compute_capture_hash=args.hash_capture,
+            detector_start_offset_samples_2m=(
+                args.detector_start_offset_samples_2m
+            ),
         )
         print(f"generated {len(generated)} OTA phase files")
         return 0
@@ -2317,6 +2348,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=args.overwrite,
             reference_mode=args.reference_mode,
             compute_capture_hash=args.hash_capture,
+            detector_start_offset_samples_2m=(
+                args.detector_start_offset_samples_2m
+            ),
         )
         validation = validate_dataset(output_root)
         print(f"generated {len(generated)} OTA phase files")
@@ -2353,6 +2387,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=args.overwrite,
             reference_mode=args.reference_mode,
             compute_capture_hash=args.hash_capture,
+            detector_start_offset_samples_2m=(
+                args.detector_start_offset_samples_2m
+            ),
         )
         validation = validate_dataset(output_root)
         print(f"generated or verified {len(generated)} OTA phase files")
