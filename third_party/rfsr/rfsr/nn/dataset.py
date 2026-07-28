@@ -1,10 +1,16 @@
+import json
 import numpy as np
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
 
-from rfsr import encode, awgn
+from rfsr import (
+    apply_hi2lora_sto,
+    awgn,
+    encode,
+    encode_random_raw_phy,
+)
 
 # 当前文件位于 rfsr/nn/，OTA 参考文件路径会以这个目录为基准拼接。
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,7 +30,16 @@ class SyntheticLoRaDataset(Dataset):
     并不会在每个 epoch 重新随机 payload、SNR 或噪声。
     """
 
-    def __init__(self, oversampling=1, size=100, payload_length=16, downsampling=8, SF=12, BW=125e3):
+    def __init__(
+        self,
+        oversampling=1,
+        size=100,
+        payload_length=16,
+        downsampling=8,
+        SF=12,
+        BW=125e3,
+        snr_range=(-22.0, 10.0),
+    ):
         # 唯一 packet 数量；这些 packet 会全部预生成并保存在内存中。
         self.size = size
 
@@ -33,9 +48,11 @@ class SyntheticLoRaDataset(Dataset):
         # 输出相对输入的升采样倍数；论文和公开权重使用 OSF=4。
         self.OSF = oversampling
 
-        # 信道参数。np.random.uniform(10, -22) 虽然上下界顺序相反，
-        # NumPy 仍会生成位于 -22 dB 到 +10 dB 之间的均匀随机数。
-        self.snr_range = (10, -22)
+        # 信道参数由训练入口传入；相同上下界表示固定 SNR。
+        self.snr_range = (
+            float(min(snr_range)),
+            float(max(snr_range)),
+        )
 
         # LoRa 物理层参数。
         self.center_freq = 915e6
@@ -114,8 +131,301 @@ class SyntheticLoRaDataset(Dataset):
         return self.x_batched[idx], self.y_batched[idx], self.snr_batched[idx],
 
 
+class ReferencePhyPretrainingDataset(Dataset):
+    """按 reference metadata 的 PHY 配置构造合成预训练数据对。
 
-class OTALoRaDataset(Dataset):
+    默认仅使用 metadata 中的 PHY 参数和 raw frame 长度，每次取样都调用
+    ``PHY.encode_random_raw_phy`` 生成全新的 payload 和 clean 标签 ``y``。
+    ``random_payload=False`` 时才读取已有 cfile，作为固定 payload 对照。
+    两种模式都会按 ``oversampling`` 构造 ``x``，并只给 ``x`` 添加
+    STO、CFO 和 AWGN；高采样率标签 ``y`` 始终保持理想波形。
+    """
+
+    def __init__(
+        self,
+        reference_root,
+        oversampling=4,
+        size=250,
+        snr_range=(-22.0, 10.0),
+        expected_sample_rate_hz=1_000_000,
+        expected_sf=12,
+        expected_bandwidth_hz=125_000,
+        seed=42,
+        random_payload=True,
+        cfo_range_hz=(-35_000.0, 35_000.0),
+        sto_enabled=True,
+        sto_initial_range_chips=(-0.5, 0.5),
+        sto_slope_range_chips_per_symbol=(-0.05, 0.05),
+    ):
+        self.reference_root = Path(reference_root).expanduser().resolve()
+        self.reference_dir = self.reference_root / "reference"
+        self.metadata_dir = self.reference_root / "metadata"
+        self.OSF = int(oversampling)
+        self.size = int(size)
+        self.random_payload = bool(random_payload)
+        self.snr_range = (
+            float(min(snr_range)),
+            float(max(snr_range)),
+        )
+        self.cfo_range_hz = (
+            float(min(cfo_range_hz)),
+            float(max(cfo_range_hz)),
+        )
+        self.sto_enabled = bool(sto_enabled)
+        self.sto_initial_range_chips = (
+            float(min(sto_initial_range_chips)),
+            float(max(sto_initial_range_chips)),
+        )
+        self.sto_slope_range_chips_per_symbol = (
+            float(min(sto_slope_range_chips_per_symbol)),
+            float(max(sto_slope_range_chips_per_symbol)),
+        )
+        self.rng = np.random.default_rng(seed)
+        self.last_cfo_hz = 0.0
+        self.last_initial_sto_chips = 0.0
+        self.last_sto_slope_chips_per_symbol = 0.0
+
+        if self.OSF < 1:
+            raise ValueError(f"oversampling must be positive, got {self.OSF}.")
+        if self.size < 1:
+            raise ValueError(f"size must be positive, got {self.size}.")
+        if not self.metadata_dir.is_dir():
+            raise FileNotFoundError(
+                f"reference root must contain metadata/: {self.reference_root}"
+            )
+        if not self.random_payload and not self.reference_dir.is_dir():
+            raise FileNotFoundError(
+                "fixed-payload mode requires reference/: "
+                f"{self.reference_root}"
+            )
+
+        metadata_paths = sorted(self.metadata_dir.glob("*.json"))
+        if not metadata_paths:
+            raise FileNotFoundError(
+                f"no metadata JSON files found in {self.metadata_dir}"
+            )
+
+        records = []
+        expected_length = None
+        raw_phy_config = None
+        payload_length = None
+        for metadata_path in metadata_paths:
+            metadata = json.loads(
+                metadata_path.read_text(encoding="utf-8")
+            )
+            self._validate_metadata(
+                metadata,
+                metadata_path,
+                expected_sample_rate_hz,
+                expected_sf,
+                expected_bandwidth_hz,
+            )
+            current_config = self._raw_phy_config_from_metadata(metadata)
+            current_payload_length = int(metadata["packet"]["frame_bytes"])
+            if raw_phy_config is None:
+                raw_phy_config = current_config
+                payload_length = current_payload_length
+            elif current_config != raw_phy_config:
+                raise ValueError(
+                    f"{metadata_path} has a different PHY configuration."
+                )
+            elif current_payload_length != payload_length:
+                raise ValueError(
+                    f"{metadata_path} has frame_bytes={current_payload_length}, "
+                    f"expected {payload_length}."
+                )
+
+            iq = metadata["iq"]
+            iq_path = self.reference_root / str(iq["relative_path"])
+            complex_samples = int(iq["complex_samples"])
+            if not self.random_payload:
+                if not iq_path.is_file():
+                    raise FileNotFoundError(
+                        f"reference IQ declared by {metadata_path} does not "
+                        f"exist: {iq_path}"
+                    )
+                expected_bytes = complex_samples * np.dtype("<c8").itemsize
+                if iq_path.stat().st_size != expected_bytes:
+                    raise ValueError(
+                        f"{iq_path} size does not match metadata: "
+                        f"{iq_path.stat().st_size} != {expected_bytes}."
+                    )
+            if complex_samples % self.OSF:
+                raise ValueError(
+                    f"{iq_path} length {complex_samples} is not divisible by "
+                    f"oversampling={self.OSF}."
+                )
+            if expected_length is None:
+                expected_length = complex_samples
+            elif complex_samples != expected_length:
+                raise ValueError(
+                    "all references must have the same length for batching; "
+                    f"{iq_path} has {complex_samples}, expected {expected_length}."
+                )
+            records.append(
+                {
+                    "iq_path": iq_path,
+                    "payload_id": int(metadata["packet"]["payload_id"]),
+                    "complex_samples": complex_samples,
+                }
+            )
+
+        self.records = tuple(records)
+        self.output_len = int(expected_length or 0)
+        self.input_len = self.output_len // self.OSF
+        self.raw_phy_config = dict(raw_phy_config or {})
+        self.payload_length = int(payload_length or 0)
+
+    @staticmethod
+    def _validate_metadata(
+        metadata,
+        metadata_path,
+        expected_sample_rate_hz,
+        expected_sf,
+        expected_bandwidth_hz,
+    ):
+        if metadata.get("schema") != "lora-rfsr-reference":
+            raise ValueError(f"unsupported reference schema in {metadata_path}.")
+        if metadata.get("reference_kind") != "ideal_tx_complex_baseband":
+            raise ValueError(
+                f"{metadata_path} is not an ideal synthetic reference."
+            )
+        if bool(metadata.get("iq", {}).get("awgn_added", True)):
+            raise ValueError(f"{metadata_path} already contains added AWGN.")
+        if str(metadata.get("iq", {}).get("dtype")) != "<c8":
+            raise ValueError(f"{metadata_path} must declare dtype '<c8'.")
+
+        phy = metadata.get("phy", {})
+        checks = (
+            ("sample_rate_hz", expected_sample_rate_hz),
+            ("sf", expected_sf),
+            ("bandwidth_hz", expected_bandwidth_hz),
+        )
+        for key, expected in checks:
+            if expected is not None and int(phy.get(key, -1)) != int(expected):
+                raise ValueError(
+                    f"{metadata_path} declares {key}={phy.get(key)!r}, "
+                    f"expected {expected}."
+                )
+
+    @staticmethod
+    def _raw_phy_config_from_metadata(metadata):
+        phy = metadata["phy"]
+        return {
+            "fs": int(phy["sample_rate_hz"]),
+            "SF": int(phy["sf"]),
+            "BW": int(phy["bandwidth_hz"]),
+            "cr": int(phy["cr"]),
+            "enable_crc": int(bool(phy["phy_crc"])),
+            "implicit_header": int(not bool(phy["explicit_header"])),
+            "preamble_bits": int(phy["preamble_symbols"]),
+            "sync_word": int(phy["sync_word"]),
+            "ldro": bool(phy["ldro"]),
+            "crc_mode": str(phy["crc_mode"]),
+            "leading_silence_samples": int(phy["leading_silence_samples"]),
+            "trailing_silence_samples": int(phy["trailing_silence_samples"]),
+        }
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        if not 0 <= int(idx) < self.size:
+            raise IndexError(idx)
+
+        if self.random_payload:
+            encoded = encode_random_raw_phy(
+                self.payload_length,
+                rng=self.rng,
+                **self.raw_phy_config,
+            )
+            y = encoded.samples
+            if y.size != self.output_len:
+                raise RuntimeError(
+                    "random PHY output length changed: "
+                    f"{y.size} != {self.output_len}."
+                )
+        else:
+            record = self.records[int(idx) % len(self.records)]
+            clean = np.memmap(
+                record["iq_path"],
+                dtype=np.dtype("<c8"),
+                mode="r",
+                shape=(int(record["complex_samples"]),),
+            )
+            y = np.asarray(clean)
+        sampled_initial_sto = float(
+            self.rng.uniform(*self.sto_initial_range_chips)
+        )
+        sampled_sto_slope = float(
+            self.rng.uniform(*self.sto_slope_range_chips_per_symbol)
+        )
+        if self.sto_enabled:
+            initial_sto_chips = sampled_initial_sto
+            sto_slope_chips_per_symbol = sampled_sto_slope
+        else:
+            initial_sto_chips = 0.0
+            sto_slope_chips_per_symbol = 0.0
+        self.last_initial_sto_chips = initial_sto_chips
+        self.last_sto_slope_chips_per_symbol = (
+            sto_slope_chips_per_symbol
+        )
+        x_clean = apply_hi2lora_sto(
+            y,
+            fs=self.raw_phy_config["fs"],
+            BW=self.raw_phy_config["BW"],
+            SF=self.raw_phy_config["SF"],
+            output_decimation=self.OSF,
+            preamble_bits=self.raw_phy_config["preamble_bits"],
+            leading_silence_samples=self.raw_phy_config[
+                "leading_silence_samples"
+            ],
+            trailing_silence_samples=self.raw_phy_config[
+                "trailing_silence_samples"
+            ],
+            initial_sto_chips=initial_sto_chips,
+            sto_slope_chips_per_symbol=sto_slope_chips_per_symbol,
+        )
+
+        # 标签保持理想零 STO/CFO；仅在低采样率输入上模拟接收机频偏。
+        cfo_hz = float(self.rng.uniform(*self.cfo_range_hz))
+        self.last_cfo_hz = cfo_hz
+        if cfo_hz != 0.0:
+            high_rate_hz = float(self.raw_phy_config["fs"])
+            leading_samples = int(
+                self.raw_phy_config["leading_silence_samples"]
+            )
+            sample_offsets = (
+                np.arange(x_clean.size, dtype=np.float64) * self.OSF
+                - leading_samples
+            )
+            cfo_rotation = np.exp(
+                2j * np.pi * cfo_hz * sample_offsets / high_rate_hz
+            ).astype(np.complex64)
+            x_clean = np.asarray(x_clean * cfo_rotation, dtype=np.complex64)
+
+        snr_db = float(self.rng.uniform(*self.snr_range))
+        signal_power = float(np.mean(np.abs(x_clean) ** 2))
+        noise_power = signal_power / (10.0 ** (snr_db / 10.0))
+        noise_scale = np.sqrt(noise_power / 2.0)
+        noise = noise_scale * (
+            self.rng.standard_normal(x_clean.shape)
+            + 1j * self.rng.standard_normal(x_clean.shape)
+        )
+        x = np.asarray(x_clean + noise, dtype=np.complex64)
+
+        x_tensor = torch.from_numpy(
+            np.stack([x.real, x.imag], axis=0)
+        ).to(dtype=torch.float32)
+        y_tensor = torch.from_numpy(
+            np.stack([y.real, y.imag], axis=0)
+        ).to(dtype=torch.float32)
+        snr_tensor = torch.tensor([snr_db], dtype=torch.float32)
+        return x_tensor, y_tensor, snr_tensor
+
+
+
+class _LegacyUpstreamOTALoRaDataset(Dataset):
     """读取作者预处理后的逐包 OTA IQ 与配对参考 IQ。
 
     从当前 loader 可以还原出的磁盘契约如下（目录是作者代码的意图）：
@@ -147,6 +457,10 @@ class OTALoRaDataset(Dataset):
                  trim=False,
                  return_snr=False,
                  downsampling=8):
+        raise RuntimeError(
+            "The incomplete upstream OTA loader is disabled. Import "
+            "rfsr.nn.OTALoRaDataset to use the local views.csv contract."
+        )
         self.return_snr = return_snr
         self.training = training
         self.trim = trim
@@ -161,7 +475,12 @@ class OTALoRaDataset(Dataset):
         # 数据目录与 SNR 过滤。DATA_DIRECTORY 是作者环境中的硬编码路径；
         # filter_files_by_snr 需要返回 (接收文件路径列表, 对应 SNR 列表)。
         # 该函数未随公开仓库发布，所以这里尚不能直接发现你的本地数据。
-        DATA_DIRECTORY = "deepstudy/nn/data"
+        DATA_DIRECTORY = str(
+            Path(__file__).resolve().parents[4]
+            / "data"
+            / "reference_phy"
+            / "rfsr_db"
+        )
         min_snr, max_snr = snr_range
         final_list, self.snrs = filter_files_by_snr(DATA_DIRECTORY, min_snr, max_snr)
 
@@ -256,5 +575,10 @@ class OTALoRaDataset(Dataset):
             return x, y, self.snrs[idx] # also return the snr
         else:
             return x, y
+
+
+# Public OTA loading is implemented by the repository-local manifest contract.
+# Keep the upstream class above private only as a readable provenance snapshot.
+from .ota_dataset import OTALoRaDataset  # noqa: E402,F401
 
 

@@ -1,0 +1,10 @@
+{
+  "schema": "lora-rfsr-dataset-validation",
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-28T05:55:05.024020+00:00",
+  "dataset_root": "data/reference_phy/rfsr_db",
+  "ota_views_checked": 258,
+  "valid": 258,
+  "invalid": 0,
+  "warnings": 0
+}

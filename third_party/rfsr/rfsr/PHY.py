@@ -17,6 +17,9 @@
 # Copyright (c) 2025-26 Andreas Kuster <S220003@e.ntu.edu.sg>
 
 import os
+from dataclasses import dataclass
+from typing import Sequence
+
 import numpy as np
 import matplotlib
 import torch
@@ -52,6 +55,557 @@ min_time_lora_packet = 20e-3  # 20 milliseconds
 
 
 ##########################################################
+
+
+@dataclass(frozen=True)
+class RawPhyEncoding:
+    """raw PHY payload 的理想 IQ 与调制器 symbol ID。"""
+
+    payload: bytes
+    cfo_hz: float
+    samples: np.ndarray
+    header_symbol_ids: tuple[int, ...]
+    payload_symbol_ids: tuple[int, ...]
+
+
+def _raw_whitening_sequence(length):
+    """生成 gr-lora_sdr 使用的 8-bit whitening 序列。"""
+
+    state = np.ones(8, dtype=np.uint8)
+    feedback_mask = np.array([0, 0, 0, 1, 1, 1, 0, 1], dtype=np.uint8)
+    sequence = []
+    for _ in range(int(length)):
+        sequence.append(
+            sum(int(state[bit]) << bit for bit in range(8))
+        )
+        feedback = int(np.sum(state * feedback_mask) % 2)
+        state = np.concatenate(
+            (np.array([feedback], dtype=np.uint8), state[:-1])
+        )
+    return sequence
+
+
+def _raw_crc16(payload):
+    """CRC-16(poly=0x1021, init=0)，与 gr-lora_sdr 对齐。"""
+
+    crc = 0
+    for value in payload:
+        byte = int(value) & 0xFF
+        for _ in range(8):
+            if (((crc & 0x8000) >> 8) ^ (byte & 0x80)):
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+            byte = (byte << 1) & 0xFF
+    return int(crc)
+
+
+def _raw_int_to_bits_msb(value, n_bits):
+    return [
+        (int(value) >> bit) & 1
+        for bit in range(int(n_bits) - 1, -1, -1)
+    ]
+
+
+def _raw_bits_to_int(bits):
+    value = 0
+    for bit in bits:
+        value = (value << 1) | int(bool(bit))
+    return int(value)
+
+
+def _raw_header_nibbles(payload_len, cr, has_crc):
+    n0 = (int(payload_len) >> 4) & 0x0F
+    n1 = int(payload_len) & 0x0F
+    n2 = ((int(cr) & 0x07) << 1) | int(bool(has_crc))
+    c4 = (
+        ((n0 & 0b1000) >> 3)
+        ^ ((n0 & 0b0100) >> 2)
+        ^ ((n0 & 0b0010) >> 1)
+        ^ (n0 & 0b0001)
+    )
+    c3 = (
+        ((n0 & 0b1000) >> 3)
+        ^ ((n1 & 0b1000) >> 3)
+        ^ ((n1 & 0b0100) >> 2)
+        ^ ((n1 & 0b0010) >> 1)
+        ^ (n2 & 0b0001)
+    )
+    c2 = (
+        ((n0 & 0b0100) >> 2)
+        ^ ((n1 & 0b1000) >> 3)
+        ^ (n1 & 0b0001)
+        ^ ((n2 & 0b1000) >> 3)
+        ^ ((n2 & 0b0010) >> 1)
+    )
+    c1 = (
+        ((n0 & 0b0010) >> 1)
+        ^ ((n1 & 0b0100) >> 2)
+        ^ (n1 & 0b0001)
+        ^ ((n2 & 0b0100) >> 2)
+        ^ ((n2 & 0b0010) >> 1)
+        ^ (n2 & 0b0001)
+    )
+    c0 = (
+        (n0 & 0b0001)
+        ^ ((n1 & 0b0010) >> 1)
+        ^ ((n2 & 0b1000) >> 3)
+        ^ ((n2 & 0b0100) >> 2)
+        ^ ((n2 & 0b0010) >> 1)
+        ^ (n2 & 0b0001)
+    )
+    return [
+        n0,
+        n1,
+        n2,
+        int(c4),
+        int((c3 << 3) | (c2 << 2) | (c1 << 1) | c0),
+    ]
+
+
+def _raw_payload_nibbles(payload):
+    whitening = _raw_whitening_sequence(len(payload))
+    nibbles = []
+    for offset, value in enumerate(payload):
+        whitened = (int(value) & 0xFF) ^ int(whitening[offset])
+        nibbles.extend((whitened & 0x0F, (whitened >> 4) & 0x0F))
+    return nibbles
+
+
+def _raw_crc_nibbles(payload, crc_mode):
+    payload_bytes = bytes(int(value) & 0xFF for value in payload)
+    mode = str(crc_mode).lower()
+    if mode == "sx1276":
+        crc = _raw_crc16(payload_bytes)
+    elif mode == "grlora":
+        crc = _raw_crc16(payload_bytes[: max(0, len(payload_bytes) - 2)])
+        if len(payload_bytes) >= 2:
+            crc ^= int(payload_bytes[-1])
+            crc ^= int(payload_bytes[-2]) << 8
+    else:
+        raise ValueError(
+            "crc_mode must be 'grlora' or 'sx1276', "
+            f"got {crc_mode!r}."
+        )
+    return [
+        crc & 0x000F,
+        (crc & 0x00F0) >> 4,
+        (crc & 0x0F00) >> 8,
+        (crc & 0xF000) >> 12,
+    ]
+
+
+def _raw_hamming_nibble(nibble, cr):
+    data = _raw_int_to_bits_msb(int(nibble) & 0x0F, 4)
+    if int(cr) == 1:
+        parity = data[0] ^ data[1] ^ data[2] ^ data[3]
+        return int(
+            (data[3] << 4)
+            | (data[2] << 3)
+            | (data[1] << 2)
+            | (data[0] << 1)
+            | parity
+        )
+
+    p0 = data[3] ^ data[2] ^ data[1]
+    p1 = data[2] ^ data[1] ^ data[0]
+    p2 = data[3] ^ data[2] ^ data[0]
+    p3 = data[3] ^ data[1] ^ data[0]
+    full = (
+        (data[3] << 7)
+        | (data[2] << 6)
+        | (data[1] << 5)
+        | (data[0] << 4)
+        | (p0 << 3)
+        | (p1 << 2)
+        | (p2 << 1)
+        | p3
+    )
+    return int(full >> (4 - int(cr)))
+
+
+def _raw_hamming_encode(nibbles, sf, cr):
+    return [
+        _raw_hamming_nibble(
+            nibble,
+            4 if index < int(sf) - 2 else int(cr),
+        )
+        for index, nibble in enumerate(nibbles)
+    ]
+
+
+def _raw_interleave(codewords, sf, cr, ldro, frame_len_nibbles):
+    values = [int(value) for value in codewords]
+    codeword_count = 0
+    position = 0
+    symbols = []
+    while position < len(values):
+        first_or_ldro = codeword_count < int(sf) - 2 or bool(ldro)
+        codeword_len = 4 + (
+            4 if codeword_count < int(sf) - 2 else int(cr)
+        )
+        sf_app = int(sf) - 2 if first_or_ldro else int(sf)
+        remaining = len(values) - position
+        item_count = min(remaining, sf_app)
+        if (
+            item_count < sf_app
+            and codeword_count + item_count != int(frame_len_nibbles)
+        ):
+            break
+
+        codeword_bits = []
+        for index in range(sf_app):
+            if index >= item_count:
+                codeword_bits.append(
+                    _raw_int_to_bits_msb(0, codeword_len)
+                )
+            else:
+                codeword_bits.append(
+                    _raw_int_to_bits_msb(
+                        values[position + index],
+                        codeword_len,
+                    )
+                )
+            codeword_count += 1
+        position += item_count
+
+        for row_index in range(codeword_len):
+            row = [0 for _ in range(int(sf))]
+            for column_index in range(sf_app):
+                row[column_index] = codeword_bits[
+                    (row_index - column_index - 1) % sf_app
+                ][row_index]
+            if codeword_count == int(sf) - 2 or bool(ldro):
+                row[sf_app] = sum(row[:sf_app]) % 2
+            symbols.append(_raw_bits_to_int(row))
+    return symbols
+
+
+def _raw_gray_map(symbols, sf):
+    mask = (1 << int(sf)) - 1
+    output = []
+    for value in symbols:
+        binary = int(value) & mask
+        gray = binary
+        for shift in range(1, int(sf)):
+            gray ^= binary >> shift
+        output.append((int(gray) + 1) & mask)
+    return output
+
+
+def encode_raw_phy_symbols(
+    payload: bytes | bytearray | Sequence[int],
+    *,
+    sf=12,
+    cr=4,
+    enable_crc=1,
+    ldro=True,
+    crc_mode="grlora",
+):
+    """把 raw PHY payload 编码为 explicit-header LoRa symbol ID。"""
+
+    payload_bytes = bytes(int(value) & 0xFF for value in payload)
+    if not 1 <= len(payload_bytes) <= 255:
+        raise ValueError(
+            f"raw PHY payload length must be 1..255, got {len(payload_bytes)}."
+        )
+    if not 7 <= int(sf) <= 12:
+        raise ValueError(f"SF must be in [7, 12], got {sf}.")
+    if int(cr) not in {1, 2, 3, 4}:
+        raise ValueError(f"CR must be 1..4, got {cr}.")
+
+    nibbles = _raw_header_nibbles(
+        len(payload_bytes),
+        int(cr),
+        bool(enable_crc),
+    )
+    nibbles.extend(_raw_payload_nibbles(payload_bytes))
+    if bool(enable_crc):
+        nibbles.extend(_raw_crc_nibbles(payload_bytes, crc_mode))
+
+    codewords = _raw_hamming_encode(nibbles, int(sf), int(cr))
+    interleaved = _raw_interleave(
+        codewords,
+        int(sf),
+        int(cr),
+        bool(ldro),
+        len(nibbles),
+    )
+    symbols = _raw_gray_map(interleaved, int(sf))
+    return tuple(symbols[:8]), tuple(symbols[8:])
+
+
+def _raw_upchirp(sf, symbol_id, os_factor):
+    """生成与 gr-lora_sdr 调制器一致的一条 upchirp。"""
+
+    sf = int(sf)
+    os_factor = int(os_factor)
+    bins = 1 << sf
+    symbol_id = int(symbol_id) % bins
+    sample_index = np.arange(bins * os_factor, dtype=np.float64)
+    fold = bins * os_factor - symbol_id * os_factor
+    slope = (
+        sample_index * sample_index
+        / (2.0 * bins)
+        / (os_factor * os_factor)
+    )
+    linear_before = (
+        (symbol_id / bins - 0.5) * sample_index / os_factor
+    )
+    linear_after = (
+        (symbol_id / bins - 1.5) * sample_index / os_factor
+    )
+    phase = np.where(
+        sample_index < fold,
+        slope + linear_before,
+        slope + linear_after,
+    )
+    return np.exp(2j * np.pi * phase).astype(np.complex64)
+
+
+def encode_raw_phy(
+    payload: bytes | bytearray | Sequence[int],
+    fs,
+    *,
+    SF=12,
+    BW=125_000,
+    cr=4,
+    enable_crc=1,
+    implicit_header=0,
+    preamble_bits=8,
+    sync_word=0x12,
+    ldro=True,
+    crc_mode="grlora",
+    leading_silence_samples=10_000,
+    trailing_silence_samples=0,
+    cfo_hz=0.0,
+):
+    """生成不添加 RF-SR 私有 4-byte 头的理想 raw PHY IQ。
+
+    ``payload`` 已经是完整 PHY payload。函数只添加 LoRa explicit header、
+    可选 PHY CRC、前导码、sync word 和 SFD。``cfo_hz`` 只作用于包内波形；
+    AWGN、信道响应和接收增益仍由上层决定。旧 :func:`encode` 的私有头语义
+    保持不变。
+    """
+
+    if bool(implicit_header):
+        raise ValueError("encode_raw_phy currently supports explicit header only.")
+    if int(fs) <= 0 or int(BW) <= 0 or int(fs) % int(BW):
+        raise ValueError(
+            f"fs must be a positive integer multiple of BW, got {fs}/{BW}."
+        )
+    if not 0 <= int(sync_word) <= 0xFF:
+        raise ValueError(f"sync_word must fit uint8, got {sync_word}.")
+    if int(preamble_bits) < 5:
+        raise ValueError("preamble_bits must be at least 5.")
+    if int(leading_silence_samples) < 0:
+        raise ValueError("leading_silence_samples must be non-negative.")
+    if int(trailing_silence_samples) < 0:
+        raise ValueError("trailing_silence_samples must be non-negative.")
+
+    payload_bytes = bytes(int(value) & 0xFF for value in payload)
+    header_symbols, payload_symbols = encode_raw_phy_symbols(
+        payload_bytes,
+        sf=int(SF),
+        cr=int(cr),
+        enable_crc=bool(enable_crc),
+        ldro=bool(ldro),
+        crc_mode=str(crc_mode),
+    )
+    os_factor = int(fs) // int(BW)
+    samples_per_symbol = (1 << int(SF)) * os_factor
+    upchirp = _raw_upchirp(int(SF), 0, os_factor)
+    downchirp = np.conjugate(upchirp).astype(np.complex64)
+    sync1 = ((int(sync_word) >> 4) & 0x0F) << 3
+    sync2 = (int(sync_word) & 0x0F) << 3
+
+    parts = [
+        np.zeros(int(leading_silence_samples), dtype=np.dtype("<c8")),
+        np.tile(upchirp, int(preamble_bits)),
+        _raw_upchirp(int(SF), sync1, os_factor),
+        _raw_upchirp(int(SF), sync2, os_factor),
+        downchirp,
+        downchirp,
+        downchirp[: samples_per_symbol // 4],
+    ]
+    parts.extend(
+        _raw_upchirp(int(SF), symbol, os_factor)
+        for symbol in header_symbols + payload_symbols
+    )
+    if int(trailing_silence_samples):
+        parts.append(
+            np.zeros(
+                int(trailing_silence_samples),
+                dtype=np.dtype("<c8"),
+            )
+        )
+    samples = np.concatenate(parts).astype(np.dtype("<c8"), copy=False)
+    cfo_hz = float(cfo_hz)
+    if cfo_hz != 0.0:
+        # 相位从 packet 起点而非前置静默开始累计，和上游 complex_lora_packet
+        # 先调制 packet、再写入固定 10,000 点静默缓冲区的顺序一致。
+        packet_time = (
+            np.arange(samples.size, dtype=np.float64)
+            - int(leading_silence_samples)
+        ) / float(fs)
+        cfo_rotation = np.exp(
+            2j * np.pi * cfo_hz * packet_time
+        ).astype(np.complex64)
+        samples = np.asarray(samples * cfo_rotation, dtype=np.dtype("<c8"))
+    return RawPhyEncoding(
+        payload=payload_bytes,
+        cfo_hz=cfo_hz,
+        samples=samples,
+        header_symbol_ids=tuple(int(value) for value in header_symbols),
+        payload_symbol_ids=tuple(int(value) for value in payload_symbols),
+    )
+
+
+def apply_hi2lora_sto(
+    samples,
+    *,
+    fs,
+    BW,
+    SF,
+    output_decimation,
+    preamble_bits,
+    leading_silence_samples=0,
+    trailing_silence_samples=0,
+    initial_sto_chips=0.0,
+    sto_slope_chips_per_symbol=0.0,
+):
+    """按 Hi²LoRa 的符号级模型给低采样率输入加入 STO。
+
+    ``initial_sto_chips`` 和 ``sto_slope_chips_per_symbol`` 都以 chip 为
+    单位。这里直接实现产生式 ``i -> i - tau_s``，其中
+    ``tau_s = tau_0 + s * slope``。对应式 (2e) 时，
+    ``zeta = -slope / (2**SF - 1)``。
+
+    分数采样直接作用于完整 PHY 波形，因此式 (2b) 的符号相关相位、
+    式 (2d) 的 ``f_s ~= -tau_s``，以及式 (2c)/(2f) 描述的 chirp
+    回绕相位差都会自然出现，无需再次乘相位补丁。
+    """
+
+    source = np.asarray(samples, dtype=np.dtype("<c8"))
+    sample_rate_hz = int(fs)
+    bandwidth_hz = int(BW)
+    sf = int(SF)
+    decimation = int(output_decimation)
+    preamble_symbols = int(preamble_bits)
+    leading_samples = int(leading_silence_samples)
+    trailing_samples = int(trailing_silence_samples)
+    initial_sto = float(initial_sto_chips)
+    sto_slope = float(sto_slope_chips_per_symbol)
+
+    if source.ndim != 1:
+        raise ValueError("samples must be a one-dimensional complex array.")
+    if sample_rate_hz <= 0 or bandwidth_hz <= 0:
+        raise ValueError("fs and BW must be positive.")
+    if sample_rate_hz % bandwidth_hz:
+        raise ValueError("fs must be an integer multiple of BW.")
+    if decimation < 1:
+        raise ValueError("output_decimation must be positive.")
+    if leading_samples < 0 or trailing_samples < 0:
+        raise ValueError("silence sample counts must be non-negative.")
+    if leading_samples + trailing_samples > source.size:
+        raise ValueError("silence sample counts exceed the waveform length.")
+
+    high_samples_per_chip = sample_rate_hz // bandwidth_hz
+    high_samples_per_symbol = (1 << sf) * high_samples_per_chip
+    if high_samples_per_symbol % decimation:
+        raise ValueError(
+            "output_decimation must preserve an integer number of samples "
+            "per LoRa symbol."
+        )
+
+    output_source_indices = np.arange(
+        0,
+        source.size,
+        decimation,
+        dtype=np.int64,
+    )
+    output = np.asarray(source[output_source_indices], dtype=np.complex64)
+    if initial_sto == 0.0 and sto_slope == 0.0:
+        return output
+
+    packet_end = source.size - trailing_samples
+    packet_mask = (
+        (output_source_indices >= leading_samples)
+        & (output_source_indices < packet_end)
+    )
+    packet_indices = output_source_indices[packet_mask]
+    packet_offsets = packet_indices - leading_samples
+
+    # Preamble 后依次是两个 sync upchirp、两个完整 downchirp 和
+    # 1/4 downchirp。data symbol 因此从 (preamble + 4.25)T_s 开始。
+    data_start = (
+        (preamble_symbols + 4) * high_samples_per_symbol
+        + high_samples_per_symbol // 4
+    )
+    symbol_positions = np.floor_divide(
+        packet_offsets,
+        high_samples_per_symbol,
+    ).astype(np.float64)
+    data_mask = packet_offsets >= data_start
+    symbol_positions[data_mask] = (
+        preamble_symbols
+        + 4.25
+        + np.floor_divide(
+            packet_offsets[data_mask] - data_start,
+            high_samples_per_symbol,
+        )
+    )
+
+    tau_chips = initial_sto + sto_slope * symbol_positions
+    query_indices = (
+        packet_indices.astype(np.float64)
+        - tau_chips * high_samples_per_chip
+    )
+    left_indices = np.floor(query_indices).astype(np.int64)
+    fractions = query_indices - left_indices
+    valid = (query_indices >= 0.0) & (query_indices <= source.size - 1)
+    left_clipped = np.clip(left_indices, 0, source.size - 1)
+    right_clipped = np.clip(left_indices + 1, 0, source.size - 1)
+    interpolated = (
+        source[left_clipped] * (1.0 - fractions)
+        + source[right_clipped] * fractions
+    )
+    interpolated[~valid] = 0.0
+    output[packet_mask] = np.asarray(interpolated, dtype=np.complex64)
+    return np.asarray(output, dtype=np.dtype("<c8"))
+
+
+def encode_random_raw_phy(
+    payload_length,
+    fs,
+    *,
+    seed=None,
+    rng=None,
+    **phy_kwargs,
+):
+    """随机生成指定长度的 raw PHY payload，并编码成理想 IQ。
+
+    ``seed`` 适合独立、可复现地生成一条样本；dataset 应传入长期持有的
+    ``numpy.random.Generator``，从而让每次 ``__getitem__`` 得到新 payload。
+    """
+
+    length = int(payload_length)
+    if not 1 <= length <= 255:
+        raise ValueError(
+            f"payload_length must be in [1, 255], got {payload_length}."
+        )
+    if seed is not None and rng is not None:
+        raise ValueError("pass either seed or rng, not both.")
+    generator = np.random.default_rng(seed) if rng is None else rng
+    if not hasattr(generator, "integers"):
+        raise TypeError("rng must provide numpy Generator.integers().")
+    payload = generator.integers(
+        0,
+        256,
+        size=length,
+        dtype=np.uint8,
+    ).tobytes()
+    return encode_raw_phy(payload, fs, **phy_kwargs)
 
 
 def lora_packet(BW, OSF, SF, k1, k2, n_pr, IH, CR, MAC_CRC, SRC, DST, SEQNO, MESSAGE, Trise, t0_frac, phi0):

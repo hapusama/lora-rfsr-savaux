@@ -1,43 +1,63 @@
-# USRP 离线 IQ 采集
+# USRP 实时检查与 IQ 采集
 
-推荐使用 `collect_usrp_iq.py`。它保存无文件头的 GNU Radio
-`gr_complex`，即 `numpy.complex64` IQ，同时生成同名 `.bin.json` 元数据。
-`usrp_iq_collector.grc` 用于 GNU Radio Companion 可视化调试。
+`usrp_iq_collector.grc` 是当前正式采集入口，流图同时提供：
 
-当前固定帧实验默认参数：
+```text
+USRP Source
+├── QT GUI 频谱与瀑布图
+├── LoRa 同步、FFT、解码和 CRC 统计
+└── 绿色 Recording 开关 -> File Sink
+```
+
+绿色按钮关闭时，USRP 和实时解码仍运行，但 selector 不把样点送入 File
+Sink，因此不会增加 `.cfile` 内容。确认位置、频谱和 CRC 情况后再打开按钮。
+
+当前 Branch4 固定帧参数：
 
 ```text
 中心频率       487.7 MHz
-采样率         500 ksample/s（RF-SR 配对实验另采/生成 250k 与 1M）
+USRP 采样率    2 Msample/s
 LoRa 带宽      125 kHz
-编码率         4/7
-前导码         32 symbols
-Sync word      0x34
+扩频因子       SF12
+编码率         4/8
+前导码         16 symbols
+Sync word      0x12
 PHY payload    33 bytes，CRC enabled
+发包周期       6000 ms
 USRP 增益      20 dB，关闭 AGC
 天线端口       RX2
 ```
 
-在安装了 GNU Radio UHD 的环境中：
+在采集机激活已安装 GNU Radio、UHD 和 `gnuradio.lora_sdr` 的环境后：
 
 ```powershell
 uhd_find_devices
 uhd_usrp_probe
-python .\acquisition\collect_usrp_iq.py `
-  --output .\data\raw\branch4_fixed\high_snr\sf10_bw125_fs500_pre32_sw34_r001.bin `
-  --duration 120 `
-  --center-freq 487.7e6 `
-  --samp-rate 500e3 `
-  --lora-bandwidth 125e3 `
-  --rf-bandwidth 500e3 `
-  --gain 20 `
-  --antenna RX2 `
-  --device-args "serial=YOUR_USRP_SERIAL"
+.\acquisition\open_live_collector_grc.bat
 ```
 
-脚本默认拒绝覆盖已有文件；确实需要覆盖时才使用 `--overwrite`。采集后把
-IQ、JSON 元数据和 SHA-256 同时登记到 `data/manifests/`。
+从项目根目录启动时，默认输出目录是 `data/raw/ota/`。文件名由流图中的
+experiment/session/location/condition/run 以及全部 PHY/射频参数生成。正式
+采集前先运行 sidecar 初始化，并把打印出的文件名填入或核对 GRC：
 
-500 ksample/s 的 complex64 约为 4 MB/s，即每分钟约 229 MiB。正式采集前先
-用 10–20 秒短记录验证中心频率、增益、丢样和磁盘写速，避免产生无法使用的
-大文件。
+```powershell
+python tools\build_rfsr_ota_dataset.py init-capture `
+  --experiment-id 1 `
+  --session-id 0 `
+  --location-id lab1 `
+  --condition lowsnr `
+  --run-id 0
+```
+
+采集结束后在采集机生成 `detections.csv`：
+
+```powershell
+python tools\build_rfsr_ota_dataset.py detect `
+  --capture data\raw\ota\<规范文件名>.cfile
+```
+
+然后复制整个 `lora-rfsr-savaux/` 到服务器。服务器只运行 `server`、
+`validate`、训练和实验入口，不需要 GNU Radio、UHD 或兄弟源码仓库。
+
+`collect_usrp_iq.py` 是不带 LoRa 实时解码的轻量命令行备用入口，不用于当前
+“现场先看 CRC、再决定是否保存”的正式流程。

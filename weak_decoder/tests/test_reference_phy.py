@@ -113,6 +113,10 @@ class ReferencePhyTest(unittest.TestCase):
             self.assertEqual(metadata["iq"]["trailing_silence_samples"], 0)
             self.assertEqual(metadata["iq"]["artificial_cfo_hz"], 0.0)
             self.assertEqual(metadata["phy"]["crc_mode"], "grlora")
+            self.assertEqual(
+                metadata["generator"]["phy_backend"],
+                "rfsr.PHY.encode_raw_phy",
+            )
 
             spans = build_symbol_spans(metadata, sample_count=int(iq.size))
             self.assertEqual(len(spans), 16 + 2 + 3 + 8 + 56)

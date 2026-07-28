@@ -1,8 +1,10 @@
 # Dataset layout
 
-IQ data is intentionally separated from Git history. The repository stores
-code, manifests and small metadata; local disks, object storage or a mounted
-cloud data volume store samples.
+IQ data is intentionally separated from Git history, but all runtime paths
+remain under this repository's `data/` tree. When deploying by copying the
+whole directory, include the ignored IQ files. A plain `git clone` contains
+only code, manifests and small metadata and is therefore not a complete
+training bundle.
 
 ## Directories
 
@@ -12,8 +14,8 @@ cloud data volume store samples.
 - `results/`: large CSV files, plots and evaluation output.
 - `manifests/`: small CSV/JSON metadata that may be committed.
 
-Use paths relative to the repository in manifests. On another machine, either
-restore the same layout or mount/link its data volume at `data/raw`.
+Use paths relative to the repository in manifests. On another machine, restore
+the same `data/` layout; no sibling project or absolute host path is required.
 
 ## Capture groups
 
@@ -63,7 +65,7 @@ records, not from the 20-byte application payload:
 ```powershell
 python tools/generate_reference_phy.py `
   --uart-log data/raw/packet_reference.txt `
-  --output-root D:\rfsr_db `
+  --output-root data/reference_phy `
   --limit 2
 ```
 
@@ -95,9 +97,10 @@ panel:
 
 ```powershell
 python tools/plot_reference_phy_stft.py `
-  --input D:\rfsr_db\reference\signalout_000000_fulltrim.cfile
+  --input data\reference_phy\reference\signalout_000000_fulltrim.cfile
 ```
 
 Use repeated `--section` options for a smaller plot set, for example
 `--section header --section payload`. The script reads the paired metadata
-automatically and writes paginated PNG files under `D:\rfsr_db\stft\`.
+automatically and writes paginated PNG files under
+`data/reference_phy/stft/`.

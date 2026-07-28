@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 import hashlib
 import math
 import os
@@ -435,6 +436,12 @@ class GrloraPacketDetector:
             headers = list(tb.header_sink.headers)
             payloads = list(tb.payload_sink.payloads)
         finally:
+            # On Windows, file_source keeps the staged hardlink open until the
+            # top block is destroyed.  Release it before unlinking so a
+            # successful detect does not leave a 12+ GB-looking temp entry.
+            if "tb" in locals():
+                del tb
+                gc.collect()
             cleanup_file_source_path(file_source_path)
 
         merged = merge_detector_frames(frames, headers, payloads)

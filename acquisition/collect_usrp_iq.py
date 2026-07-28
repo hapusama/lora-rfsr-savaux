@@ -27,8 +27,8 @@ try:
     from gnuradio import uhd
 except ImportError as exc:
     raise SystemExit(
-        "当前 Python 环境中没有 GNU Radio UHD 支持。请使用本机的 RadioConda 环境 "
-        r"D:\mysoft2\radioconda（例如：conda activate D:\mysoft2\radioconda）。"
+        "当前 Python 环境中没有 GNU Radio UHD 支持。请在采集机上激活已安装 "
+        "GNU Radio 和 UHD 的 Python/Conda 环境。"
     ) from exc
 
 

@@ -38,6 +38,10 @@ temp/
 # Dataset layers: keep only documentation, placeholders and manifests.
 data/raw/*
 !data/raw/.gitkeep
+!data/raw/packet_reference.txt
+!data/raw/ota/
+data/raw/ota/*
+!data/raw/ota/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 data/results/*

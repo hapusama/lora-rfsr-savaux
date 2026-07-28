@@ -1,0 +1,107 @@
+{
+  "schema": "lora-rfsr-ota-view",
+  "schema_version": 1,
+  "created_at_utc": "2026-07-28T05:54:30.732185+00:00",
+  "ota_id": "exp0_000032_rxg20_0_fulltrim",
+  "physical_packet_uid": "exp000_sess000_run000:seg00:slot000032",
+  "capture_packet_index": 32,
+  "split_group": "exp000_sess000_run000:seg00:slot000032",
+  "capture": {
+    "capture_uid": "exp000_sess000_run000",
+    "source_path": "data/raw/ota/rxcap_exp000_sess000_loclab1_condhighsnr_run000_sf12_bw125000_fs2000000_pre16_sw12_cr48_crc1_fc487700000_rxg20.cfile",
+    "source_sha256": "03CC9C420B5BEEAA6FFBFDE5DDC3BD58EF98FEEFF10D57F05802F36265294EF4",
+    "source_bytes": 12480000000,
+    "source_sample_rate_hz": 2000000,
+    "center_frequency_hz": 487700000,
+    "rf_bandwidth_hz": 1000000,
+    "rx_gain_db": 20.0,
+    "rx_gain_mode": "manual",
+    "agc_enabled": false,
+    "antenna": "RX2",
+    "experiment_id": 0,
+    "session_id": 0,
+    "location_id": "lab1",
+    "condition": "highsnr",
+    "run_id": 0
+  },
+  "packet": {
+    "decoded_frame_hex": "40 44 33 22 11 00 01 00 58 20 00 B1 09 A4 CB 21 18 DA A7 0B C6 41 D4 A5 32 B0 3B 40 5B 78 56 34 12",
+    "expected_frame_hex": "40 44 33 22 11 00 01 00 58 20 00 B1 09 A4 CB 21 18 DA A7 0B C6 41 D4 A5 32 B0 3B 40 5B 78 56 34 12",
+    "crc_valid": true
+  },
+  "reference": {
+    "reference_id": 32,
+    "relative_path": "reference/signalout_000032_fulltrim.cfile",
+    "sha256": "5A7DEEC981251C13BABADB8D8189272B7915DECCDCCD5A2C29EA1B2F96179CA3",
+    "sample_rate_hz": 1000000,
+    "complex_samples": 2770704,
+    "leading_zero_samples": 10000
+  },
+  "association": {
+    "method": "crc_exact",
+    "confidence": 1.0,
+    "catalog_frame_exact": true,
+    "sequence_segment": 0,
+    "schedule_slot": 32,
+    "previous_anchor_detection": "31",
+    "next_anchor_detection": "31"
+  },
+  "trim": {
+    "detected_preamble_start_sample_2m": 388239864,
+    "start_sample_2m": 388219864,
+    "stop_sample_2m_exclusive": 393761272,
+    "complex_samples_2m": 5541408,
+    "leading_off_packet_samples_2m": 20000,
+    "timing_residual_samples_2m": "-535"
+  },
+  "ota": {
+    "relative_path": "ota/exp0_000032_rxg20_0_fulltrim.cfile",
+    "dtype": "<c8",
+    "bytes": 22165632,
+    "complex_samples": 2770704,
+    "sha256": "122798CBA1AF7D865EDC8285882D66A8AA02F7737F33125E3D1F1A502B112523",
+    "leading_real_off_packet_samples": 10000
+  },
+  "view": {
+    "sample_rate_hz": 1000000,
+    "complex_samples": 2770704,
+    "adc_phase_2m": 0,
+    "adc_phase_timing_offset_samples_1m": 0.0,
+    "available_lowrate_phases_1m": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "combined_decimation_phases_2m": [
+      0,
+      2,
+      4,
+      6
+    ],
+    "lowrate_sample_rate_hz": 250000,
+    "lowrate_samples": 692676,
+    "lowrate_leading_off_packet_samples": 2500,
+    "anti_alias_filter_applied": false
+  },
+  "alignment": {
+    "status": "packet_boundary_aligned",
+    "cfo_correction_applied": false,
+    "complex_gain_correction_applied": false,
+    "amplitude_normalization_applied": false,
+    "estimated_cfo_hz": "-127.996337890625",
+    "grlora_snr_db": "-1.9794412851333618",
+    "sto": "454.85980224609375",
+    "sfo": "-0.03280611336231232",
+    "estimated_complex_gain_real": "",
+    "estimated_complex_gain_imag": ""
+  },
+  "quality_control": {
+    "finite_samples": true,
+    "leading_off_packet_is_real": true,
+    "leading_off_packet_power": 1.0475060938397451e-07,
+    "active_packet_power": 1.7164608421982404e-07,
+    "reference_leading_samples_are_zero": true,
+    "expected_output_samples": 2770704
+  }
+}

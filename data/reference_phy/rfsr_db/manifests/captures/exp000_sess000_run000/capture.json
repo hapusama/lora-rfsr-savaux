@@ -1,0 +1,36 @@
+{
+  "schema": "lora-rfsr-usrp-capture",
+  "schema_version": 1,
+  "updated_at_utc": "2026-07-28T04:12:18.103678+00:00",
+  "capture_path": "data/raw/ota/rxcap_exp000_sess000_loclab1_condhighsnr_run000_sf12_bw125000_fs2000000_pre16_sw12_cr48_crc1_fc487700000_rxg20.cfile",
+  "capture": {
+    "experiment_id": 0,
+    "session_id": 0,
+    "location_id": "lab1",
+    "condition": "highsnr",
+    "run_id": 0,
+    "sf": 12,
+    "bandwidth_hz": 125000,
+    "sample_rate_hz": 2000000,
+    "preamble_symbols": 16,
+    "sync_word": 18,
+    "cr": 4,
+    "phy_crc": true,
+    "center_frequency_hz": 487700000,
+    "rx_gain_db": 20.0,
+    "pay_len": 33,
+    "ldro_mode": 1,
+    "crc_mode": "grlora",
+    "rf_bandwidth_hz": 1000000,
+    "antenna": "RX2",
+    "agc_enabled": false,
+    "device_args": ""
+  },
+  "file": {
+    "bytes": 12480000000,
+    "complex_samples": 1560000000,
+    "duration_seconds": 780.0,
+    "mtime_ns": 1785207238845734200,
+    "sha256": "03CC9C420B5BEEAA6FFBFDE5DDC3BD58EF98FEEFF10D57F05802F36265294EF4"
+  }
+}

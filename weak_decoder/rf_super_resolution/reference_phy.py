@@ -20,15 +20,17 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any, Iterable
 
 import numpy as np
 
-from weak_decoder.chirp import build_upchirp
-from weak_decoder.decoding.payload_codec import (
-    decode_explicit_frame_symbols,
-    encode_explicit_frame_modulator_symbols,
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RFSR_ROOT = REPO_ROOT / "third_party" / "rfsr"
+if str(RFSR_ROOT) not in sys.path:
+    sys.path.insert(0, str(RFSR_ROOT))
+
+from weak_decoder.decoding.payload_codec import decode_explicit_frame_symbols
 
 
 REFERENCE_SCHEMA_VERSION = 2
@@ -41,6 +43,18 @@ _FRAME_RE = re.compile(
     r"^\[TX Frame\]\s+seq=(\d+)\s+id=(\d+)"
     r"\s+frame_len=(\d+)\s+data=(.+)$"
 )
+
+
+def _portable_source_path(path: str | Path) -> str:
+    """Prefer a repository-relative provenance path when one is available."""
+
+    resolved = Path(path).expanduser().resolve()
+    try:
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
 _FIELDS_RE = re.compile(r"^\[TX Frame Fields\]\s+(.+)$")
 
 
@@ -365,19 +379,32 @@ def encode_reference_phy(
 ) -> EncodedReference:
     """把一个完整 raw PHY payload 编码成 RF-SR 兼容的 ``complex64`` IQ。"""
 
+    # UART catalog parsing and OTA trimming do not require PyTorch.  Import the
+    # RF-SR waveform backend only when a new ideal reference is actually encoded.
+    from rfsr.PHY import encode_raw_phy
+
     config.validate()
     frame_bytes = bytes(int(value) & 0xFF for value in frame)
     if not 1 <= len(frame_bytes) <= 255:
         raise ValueError(f"PHY payload length must be 1..255, got {len(frame_bytes)}.")
 
-    header_symbols, payload_symbols = encode_explicit_frame_modulator_symbols(
+    raw_encoding = encode_raw_phy(
         frame_bytes,
-        sf=int(config.sf),
+        int(config.sample_rate_hz),
+        SF=int(config.sf),
+        BW=int(config.bandwidth_hz),
         cr=int(config.cr),
-        has_crc=bool(config.phy_crc),
+        enable_crc=bool(config.phy_crc),
+        implicit_header=0,
+        preamble_bits=int(config.preamble_symbols),
+        sync_word=int(config.sync_word),
         ldro=bool(config.ldro),
         crc_mode=str(config.crc_mode),
+        leading_silence_samples=int(config.leading_silence_samples),
+        trailing_silence_samples=int(config.trailing_silence_samples),
     )
+    header_symbols = raw_encoding.header_symbol_ids
+    payload_symbols = raw_encoding.payload_symbol_ids
 
     # Internal round trip catches header/CRC/whitening/interleaver regressions
     # before any large cfile is written.
@@ -408,32 +435,8 @@ def encode_reference_phy(
             f"generated PHY CRC failed internal {config.crc_mode} verification."
         )
 
-    os_factor = config.os_factor
-    upchirp = build_upchirp(int(config.sf), symbol_id=0, os_factor=os_factor)
-    downchirp = np.conjugate(upchirp).astype(np.complex64)
-    sync1 = ((int(config.sync_word) >> 4) & 0x0F) << 3
-    sync2 = (int(config.sync_word) & 0x0F) << 3
-    # RF-SR 的合成 encode() 固定在 packet 前放置零样本；packet 后不补零。
-    parts: list[np.ndarray] = [
-        np.zeros(int(config.leading_silence_samples), dtype=np.dtype("<c8")),
-        np.tile(upchirp, int(config.preamble_symbols)),
-        build_upchirp(int(config.sf), sync1, os_factor),
-        build_upchirp(int(config.sf), sync2, os_factor),
-        downchirp,
-        downchirp,
-        downchirp[: config.samples_per_symbol // 4],
-    ]
-    parts.extend(
-        build_upchirp(int(config.sf), symbol_id, os_factor)
-        for symbol_id in header_symbols + payload_symbols
-    )
-    if int(config.trailing_silence_samples):
-        parts.append(
-            np.zeros(int(config.trailing_silence_samples), dtype=np.dtype("<c8"))
-        )
-    samples = np.concatenate(parts).astype(np.dtype("<c8"), copy=False)
     return EncodedReference(
-        samples=samples,
+        samples=raw_encoding.samples,
         header_symbol_ids=tuple(int(value) for value in header_symbols),
         payload_symbol_ids=tuple(int(value) for value in payload_symbols),
     )
@@ -451,6 +454,7 @@ def reference_metadata(
     """Build the auditable JSON sidecar for one ideal reference."""
 
     generator_path = Path(__file__).resolve()
+    phy_backend_path = RFSR_ROOT / "rfsr" / "PHY.py"
     return {
         "schema": "lora-rfsr-reference",
         "schema_version": REFERENCE_SCHEMA_VERSION,
@@ -496,7 +500,7 @@ def reference_metadata(
             "awgn_added": False,
         },
         "source_uart": {
-            "path": str(uart_log.source_path),
+            "path": _portable_source_path(uart_log.source_path),
             "sha256": str(uart_log.source_sha256),
             "phy": dict(uart_log.phy),
             "reference_config": dict(uart_log.reference_config),
@@ -504,8 +508,13 @@ def reference_metadata(
         },
         "generator": {
             "module": "weak_decoder.rf_super_resolution.reference_phy",
-            "source_path": str(generator_path),
+            "source_path": _portable_source_path(generator_path),
             "source_sha256": _sha256_file(generator_path),
+            "phy_backend": "rfsr.PHY.encode_raw_phy",
+            "phy_backend_source_path": _portable_source_path(
+                phy_backend_path
+            ),
+            "phy_backend_source_sha256": _sha256_file(phy_backend_path),
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "internal_raw_frame_round_trip": True,
             "ota_waveform_validation": "pending",
