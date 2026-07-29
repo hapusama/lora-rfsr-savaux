@@ -34,6 +34,7 @@ from weak_decoder.synchronization.preamble_detector import (  # noqa: E402
     detect_preamble_runs,
     load_complex64_file,
 )
+from weak_decoder.synchronization.single_packet import align_event_start  # noqa: E402
 
 
 def parse_int_auto(text: str) -> int:
@@ -150,58 +151,6 @@ def select_spaced_events(
         if max_events is not None and len(selected) >= int(max_events):
             break
     return selected
-
-
-def align_event_start(
-    samples: np.ndarray,
-    event: DetectionEvent,
-    config: PreambleDetectorConfig,
-    search_radius_samples: int,
-    step_samples: int,
-    align_chirps: int,
-) -> dict[str, float | int]:
-    """在检测粗起点附近搜索更好的 chirp 边界，给后续 SFD 搜索一个稳定中心。"""
-
-    chirp_samples = config.chirp_samples
-    downchirp = np.conjugate(
-        build_upchirp(config.sf, symbol_id=0, os_factor=config.os_factor)
-    ).astype(np.complex64)
-    n_required = int(align_chirps * chirp_samples)
-    start_min = max(0, int(event.start_sample) - int(search_radius_samples))
-    start_max = min(samples.size - n_required, int(event.start_sample) + int(search_radius_samples))
-    if start_max < start_min:
-        raise ValueError(f"event {event.event_index} does not have enough samples for alignment.")
-
-    best: dict[str, float | int] | None = None
-    for candidate_start in range(start_min, start_max + 1, int(step_samples)):
-        block = np.asarray(samples[candidate_start : candidate_start + n_required], dtype=np.complex64)
-        chirps = block.reshape(int(align_chirps), chirp_samples)
-        spectrum = np.fft.fft(chirps * downchirp[np.newaxis, :], axis=1)
-        energy = np.sum(np.abs(spectrum) ** 2, axis=0, dtype=np.float64)
-        total_power = float(np.sum(energy, dtype=np.float64))
-        if total_power <= 0.0:
-            continue
-        peak_bin = int(np.argmax(energy))
-        peak_power = float(energy[peak_bin])
-        second_power = float(np.partition(energy, -2)[-2]) if energy.size > 1 else 0.0
-        confidence_db = 10.0 * math.log10((peak_power + 1e-30) / (second_power + 1e-30))
-        peak_share = peak_power / total_power
-        if best is None or peak_power > float(best["align_score"]):
-            best = {
-                "aligned_start_sample": int(candidate_start),
-                "align_offset_samples": int(candidate_start - int(event.start_sample)),
-                "align_peak_bin": peak_bin,
-                "align_peak_signed_bin": signed_fft_bin(peak_bin, chirp_samples),
-                "align_peak_power": peak_power,
-                "align_second_power": second_power,
-                "align_total_power": total_power,
-                "align_confidence_db": float(confidence_db),
-                "align_peak_share": float(peak_share),
-                "align_score": float(peak_power),
-            }
-    if best is None:
-        raise ValueError(f"event {event.event_index} has no valid alignment candidate.")
-    return best
 
 
 def write_windows_csv(path: Path, windows: list[WindowPeak], config: PreambleDetectorConfig) -> None:

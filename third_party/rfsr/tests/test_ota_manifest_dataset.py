@@ -14,7 +14,12 @@ RFSR_ROOT = Path(__file__).resolve().parents[1]
 if str(RFSR_ROOT) not in sys.path:
     sys.path.insert(0, str(RFSR_ROOT))
 
-from rfsr.nn.ota_dataset import OTALoRaDataset  # noqa: E402
+from rfsr.nn.ota_dataset import (  # noqa: E402
+    OTALoRaDataset,
+    bind_checkpoint_split_manifest,
+    build_ota_split_manifest,
+    checkpoint_split_manifest_path,
+)
 
 
 class OTAManifestDatasetTest(unittest.TestCase):
@@ -197,6 +202,35 @@ class OTAManifestDatasetTest(unittest.TestCase):
             self.assertFalse(groups[0] & groups[1])
             self.assertFalse(groups[0] & groups[2])
             self.assertFalse(groups[1] & groups[2])
+
+            split_manifest = build_ota_split_manifest(
+                datasets,
+                split_seed=123,
+                max_groups=None,
+                target_source="received",
+                oversampling=4,
+                downsampling=8,
+            )
+            self.assertTrue(split_manifest["disjoint"])
+            self.assertEqual(
+                split_manifest["physical_packet_counts"],
+                {"train": 6, "validation": 2, "test": 2},
+            )
+            self.assertEqual(split_manifest["overlaps"]["train_test"], [])
+
+            checkpoint = root / "checkpoints" / "model.pth"
+            sidecar = bind_checkpoint_split_manifest(
+                checkpoint, split_manifest
+            )
+            self.assertEqual(sidecar, checkpoint_split_manifest_path(checkpoint))
+            self.assertEqual(
+                json.loads(sidecar.read_text(encoding="utf-8")),
+                split_manifest,
+            )
+            bind_checkpoint_split_manifest(checkpoint, split_manifest)
+            changed = dict(split_manifest, split_seed=999)
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                bind_checkpoint_split_manifest(checkpoint, changed)
 
             phase_one_index = next(
                 index

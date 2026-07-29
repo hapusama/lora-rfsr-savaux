@@ -1,138 +1,72 @@
-# OS-LoRa 弱包解码模块
+# OS-LoRa / Savaux 模块边界
 
-本目录按“系统实现不能依赖实验代码、实验入口不能互相依赖”的原则拆分。
-后续接入实时或离线解码链时只需要依赖 `system/`；复现实验、生成表格和绘图时
-才使用 `experiments/`。
+本目录同时保存当前联合解调所需的 Savaux 实现，以及此前 OS-LoRa 研究中仍有
+复现价值的算法。两者必须分清：当前主链只执行
+
+```text
+RFSR 输出
+  -> weak_decoder.synchronization.single_packet（在干净输出上检测与 FrameSync）
+  -> 固定 FrameSync，在 RFSR 输出上加入不同强度 AWGN
+  -> system.synchronized_savaux（带噪波形的 header-first Savaux）
+  -> 条件 SER（只统计干净 FrameSync 成功包）
+```
+
+当前主链不调用 GLS、双峰重排、CRC 引导或任何 payload 真值引导方法。
 
 ## 目录职责
 
 ```text
 os_lora/
-├── system/       可复用的解码算法与数据结构
-├── experiment_support/  多个实验共享的非在线基础设施
-├── experiments/  可独立删除和运行的评估、消融、诊断、标定与绘图入口
-├── doc/          算法说明与历史实验记录
-└── __init__.py   稳定的公共接口
+├── system/              可复用算法；包含当前 Savaux 和保留的研究算法
+├── experiment_support/  仍保留实验共用的离线基础设施
+├── experiments/         可独立运行的历史评估与消融入口
+├── tests/               算法、入口和目录依赖测试
+├── doc/                 冻结实验结果与历史说明
+└── __init__.py          兼容已有实验的公共导出
 ```
 
-`system/` 当前包含：
+## 当前主链文件
 
-- `nonuniform_sampling.py`：非均匀采样 pattern、频谱打分、GLS、条件检测器等核心算法。
-- `chirp_svd.py`：ChirpSVD 的配置、训练与候选打分实现。
-- `noise.py`：背景频点选择等共享噪声处理工具。
-- `litenap_savaux.py`：LiteNap 式真欠采样 polyphase 观测、Savaux 候选相位
-  合并和可选 phase-jump 指纹重排；`K=D` 时与完整 Savaux 数值等价。
-- `oversampled_glrt.py`：Savaux branch 的低维 GLS、完整采样双折返分量提取、
-  相干/非相干功率比、explicit-header 整 bin 校准和置信门控重判。主链只估计
-  `OSR x OSR` 的 branch 协方差，不构造 `RN x RN` 稠密矩阵。模块中原有的
-  `2 x 2` 双峰协方差与 pair GLRT 仅保留为 `savaux_dual` 历史消融，不参与
-  `proposed` 判决。当离包 branch 噪声近似白噪声时，默认门控使判决退化到
-  Savaux；`--allow-white-fold-overrides` 可用于对应消融。
+- `system/synchronized_savaux.py`：接收已经通过 FrameSync 的整包 IQ；先用
+  Savaux 解调 8 个 explicit-header symbols，解析 payload 长度、CR、CRC 和
+  LDRO，再按同步器给出的 CFO/STO/SFO 状态推进 payload 游标。
+- `../baselines/savaux_oversampled/paper_oversampled_demod.py`：实现 Savaux 论文中的
+  polyphase branch 频谱、确定性相位对齐和相干合并。
+- `../synchronization/single_packet.py`：复用已有 preamble detector、frame locator
+  和 gr-lora FrameSync，在一条 trimmed IQ 中完成单包同步。
+- `../../tools/evaluate_rfsr_savaux_ser.py`：选择 held-out 物理包，先运行 RFSR 和
+  clean FrameSync，再在 RFSR 输出上添加配对 AWGN 并复用固定同步信息调用 Savaux，
+  最后加载 reference 进行评分。
 
-`experiments/` 中的脚本可以依赖 `system/` 和 `experiment_support/`，但不得导入
-另一个实验入口；因此删除任意一个实验脚本不会导致其他实验出现导入错误。
-`system/` 不得依赖另外两个目录。实验脚本中的 CSV 字段名和算法标识仍保留英文，
-以免破坏已有结果、绘图脚本和论文数据处理流程；源代码注释与说明统一使用中文。
+评测工具同时报告 `clean_synchronized_packets / packet_count` 和条件 SER。未通过
+干净 FrameSync 的包会带 `exclusion_reason=clean_framesync_failed`，不会进入
+SER 分子或分母。同步成功后，加噪 Savaux 发生的头部无效、数据截断或符号缺失
+仍属于解调失败，会在该已同步包的 SER 中体现。
 
-## 系统代码的导入方式
+## 保留但不接入当前主链
 
-新代码优先从稳定公共接口导入：
+- `system/oversampled_glrt.py`：Savaux branch GLS、低维噪声协方差和完整采样率
+  双峰消融。文件保留供以后重新开展 GLS 对照，当前同步 Savaux 不导入它。
+- `system/nonuniform_sampling.py`、`chirp_svd.py`、`litenap_savaux.py`：非均匀采样、
+  ChirpSVD 和 LiteNap-Savaux 的历史研究实现。
+- `experiments/`：仍被测试或冻结结果文档使用的可复现实验。已经无调用者、被新
+  入口替代的一次性 sweep、标定和探针脚本已清理；新联合主链不得反向依赖这里。
 
-```python
-from weak_decoder.os_lora import build_pattern_bank, conditional_lora_gls_detect
+顶层 `os_lora.__init__` 暂时保留部分 GLS 导出，以免破坏现有历史实验和测试；
+这只是兼容接口，不表示 GLS 参与当前结果。
+
+## 依赖约束
+
+`system/` 不得导入 `experiments/` 或 `experiment_support/`。实验入口可以依赖
+`system/` 和 `experiment_support/`，但不得互相导入。架构测试还会逐个导入
+现存实验入口，防止清理后留下悬空引用。
+
+```bash
+python -m unittest \
+  weak_decoder.os_lora.tests.test_architecture \
+  weak_decoder.os_lora.tests.test_evaluate_rfsr_savaux_ser \
+  weak_decoder.tests.test_single_packet_sync -v
 ```
 
-需要明确模块来源时也可以直接导入：
-
-```python
-from weak_decoder.os_lora.system.nonuniform_sampling import build_pattern_bank
-from weak_decoder.os_lora.system.noise import select_background_bins
-```
-
-## 运行实验
-
-请从 `weakPacket_decoding` 目录以模块方式运行，避免脚本移动后出现相对路径问题：
-
-```powershell
-python -m weak_decoder.os_lora.experiments.evaluate_real_capture_gls --help
-python -m weak_decoder.os_lora.experiments.evaluate_low_complexity_gls --help
-python -m weak_decoder.os_lora.experiments.evaluate_nonuniform_sampling --help
-python -m weak_decoder.os_lora.experiments.evaluate_oversampled_glrt --help
-python -m weak_decoder.os_lora.experiments.evaluate_litenap_savaux --help
-```
-
-多 SNR 的统一 baseline 对比示例：
-
-```powershell
-python -m weak_decoder.os_lora.experiments.evaluate_oversampled_glrt `
-  --datasets 0_0_0_10_14_8 0_0_0_10_14_16 0_0_0_10_14_32 `
-  --snrs -22 -23 -24 -25 -26 --seeds 42 43 44 `
-  --output-dir data\experiments\oversampled_glrt
-```
-
-输出包括逐 seed 汇总 `summary_by_seed.csv`、跨 seed 的 `summary.csv`、逐符号
-候选/fix/break 诊断 `symbols.csv`、协方差颜色统计 `covariance.csv` 和 SER 曲线。
-评估器还支持 `--noise-shape lowpass|ar1` 的可复现 ADC-rate 有色噪声压力测试；
-它只用于验证 covariance-aware 接收器，不能替代真实有色干扰 capture。
-逐符号输出中的 `savaux_header` 用于隔离 header 整 bin 校准的贡献；
-`branch_shrinkage` 是 GLS/Savaux 分数混合消融；`branch_gls` 是主链第一阶段，
-`proposed` 表示纯 GLS 加完整采样双分量相干度重判及 header 校准；`savaux_dual`
-只代表旧的 pair-GLRT 消融。当前冻结参数的结果、
-真实 CR=4/7 验证和可复现命令见
-`doc/oversampled_glrt_results_20260722.md`。
-
-LiteNap-Savaux 的 clean-GT 后加白噪声比较使用 `noisy_iq` 的复高斯噪声约定。
-冻结命令、样本预算、逐 SNR 结果和结论见
-`doc/litenap_savaux_results_20260724.md`。当前数据未显示相对完整 Savaux 的 SER
-提升；K1/K2 应解释为采样率/计算量交换，而不是增益结论。
-`-16` 到 `-28 dB` 的逐 1 dB 错误归因见
-`doc/litenap_savaux_error_modes_20260724.md`；结果显示主要瓶颈是 modulo-`N/D`
-alias bin 本身判错，而不是 alias group 判错。
-
-实验入口按用途大致分为：
-
-- `evaluate_*.py`：性能评估与解码对比。
-- `analyze_*.py`：矩阵、候选、噪声协方差和 oracle 上限分析。
-- `calibrate_*.py`：阈值标定。
-- `compare_*.py`：条件检测器基线对比。
-- `diagnose_*.py`：候选失败诊断。
-- `plot_*.py`：结果可视化。
-
-新增可部署算法时放入 `system/` 并通过 `system/__init__.py` 和顶层
-`__init__.py` 导出；多个实验共用但不属于在线解码器的代码放入
-`experiment_support/`；一次性评估、数据扫描和画图入口放入 `experiments/`。
-
-## 真实 capture 汇总表
-
-`evaluate_real_capture_gls` 每次运行都会在输出目录生成 `capture_summary.csv`，
-其中包含包检测时刻、检测数、strict sync 数、`dechirp_gt_packet_snr_db`、
-dechirp PNR、FFT errors，以及普通 FFT、Savaux 和 GLS 的 SER。传入以下参数可以把多次运行
-更新到同一张表中：
-
-```powershell
-python -m weak_decoder.os_lora.experiments.evaluate_real_capture_gls `
-  <其余参数> `
-  --capture-summary-csv data\experiments\capture_summary.csv
-```
-
-`dechirp_gt_packet_snr_db` 使用传统单 branch dechirp FFT：先在每个 payload symbol
-中读取外部 GT bin 的能量，再按包分别累加 GT-bin 能量与其余 `2^SF - 1` 个 bin 的能量，
-计算 `10*log10(sum(E_gt) / sum(E_other))`。`capture_summary.csv` 中的主字段取逐包值的
-中位数，完整逐包结果保存在 `packet_snr.csv`。外部 GT 只用于三种解调器完成判决后的
-离线评分，不参与同步或 hard-bin 判决。dechirp PNR 是传统单 branch dechirp FFT 的
-峰值功率与背景频点中位功率之比，并在全部评分 symbol 上取中位数。
-`gls_ser` 默认对应 `gls_crossfit`，可用 `--summary-gls-method gls_offpacket` 改为
-固定包外协方差 GLS。
-
-## 架构约束测试
-
-目录依赖由自动测试固定下来：
-
-```powershell
-python -m unittest `
-  weak_decoder.os_lora.tests.test_architecture `
-  weak_decoder.os_lora.tests.test_capture_summary -v
-```
-
-测试会检查实验入口之间没有直接导入、`system/` 没有反向依赖、系统模块没有
-根目录同名副本，并逐个导入所有现存实验入口。
+历史 GLS、LiteNap 和非均匀采样的冻结命令与结论位于 `doc/`；它们只能作为
+对应实验的记录，不应被描述为当前 RFSR + Savaux 主链结果。

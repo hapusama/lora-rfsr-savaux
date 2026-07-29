@@ -4,16 +4,18 @@
 
 > 低采样率 LoRa IQ（默认 250 ksample/s）
 > → RF Super Resolution 提升到 1 Msample/s
-> → Savaux / branch-GLS 弱包解调
+> → packet detection 与 CFO/STO/SFO FrameSync
+> → Savaux 弱包解调
 > → 与原生高采样率接收链做公平对照
 
-现在优先做数据采集、RFSR 复现和五臂实验，不提前改神经网络结构。遇到可复现的失败模式后，再决定是否需要训练或改模型。
+当前联合主链暂不加入 GLS。GLS 代码只作为历史研究算法保留，不参与本文的
+RFSR + Savaux 判决或 SER 统计。
 
 ## 仓库地图
 
 | 路径 | 内容 |
 | --- | --- |
-| `weak_decoder/` | Savaux、OS-LoRa、同步、GLS 和实验代码 |
+| `weak_decoder/` | 当前同步/Savaux 实现，以及保留的 OS-LoRa 研究算法 |
 | `third_party/rfsr/` | RFSR 上游源码、公开 checkpoint 和原始结果 |
 | `acquisition/` | USRP B210 IQ 采集脚本与 GRC 流图 |
 | `noisy_iq/` | IQ 检测和功率分析工具 |
@@ -68,7 +70,7 @@ python tools/check_server_bundle.py --mode train
 预检会拒绝项目外 capture、绝对运行时 manifest 路径、缺失 reference、
 缺失 `detections.csv`、缺失 OTA 文件或缺失 Python 依赖。
 
-## 2. 先验证 RFSR 与 Savaux 串联
+## 2. RFSR、FrameSync 与 Savaux 串联
 
 公开 checkpoint 已随上游源码保留在 `third_party/rfsr/checkpoints/`。运行集成测试：
 
@@ -78,32 +80,26 @@ python -m unittest \
   weak_decoder.os_lora.tests.test_litenap_error_modes -v
 ```
 
-五臂单符号探针：
+当前端到端入口直接从 held-out OTA 物理包开始：
 
 ```bash
-python -m weak_decoder.os_lora.experiments.probe_rfsr_savaux \
-  --input-low-iq data/raw/example_low_250k.bin \
-  --start-low 0 \
-  --sf 12 \
-  --bw 125000 \
-  --input-rate 250000 \
-  --output-rate 1000000 \
-  --snr-db -15 \
-  --device cuda \
-  --native-high-iq data/raw/example_high_1m.bin \
-  --start-high 0 \
-  --output data/results/probe.json
+python -B tools/evaluate_rfsr_savaux_ser.py \
+  --ota-root data/reference_phy/rfsr_db \
+  --ota-max-groups 100 --ota-split-seed 42 \
+  --checkpoint "$CHECKPOINT" \
+  --output data/results/rfsr_savaux_ser.json \
+  --device cuda --include-clean-output \
+  --method rfsr_1msps --method native_1msps \
+  --extra-snr-start-db -20 --extra-snr-stop-db -34 --extra-snr-step-db -0.25 \
+  --noise-seed 20260728 --noise-seed-count 5
 ```
 
-`--rfsr-repo` 现在是可选项；默认使用仓库内的 `third_party/rfsr`。探针比较：
-
-1. 低采样率 Savaux；
-2. 传统插值 + Savaux；
-3. RFSR + Savaux；
-4. 原生高采样率 Savaux；
-5. 原生高采样率 branch-GLS。
-
-这只是串联 smoke test，不是最终 PER 曲线。正式实验还需要可靠的低/高采样配对和真值。
+入口先在未额外加噪的 RFSR 输出上调用
+`weak_decoder/synchronization/single_packet.py` 完成包检测和 FrameSync，并冻结
+该包的起点及 CFO/STO/SFO。随后才对 RFSR 的 1 MS/s 输出加入各档 AWGN，并调用
+`weak_decoder/os_lora/system/synchronized_savaux.py` 复用同一份 FrameSync 完成
+header-first Savaux 解调；加噪后不会重新同步。只有干净输出 FrameSync 成功的包
+进入 SER 分母，参考 metadata 只在全部 SNR 的硬判决完成后用于评分。
 
 ### 用 raw 33-byte frame 做合成预训练
 
@@ -229,9 +225,10 @@ OTA 微调不能把真实接收的低采样 IQ 配到理想发射 reference；�
 `--ota-target received` 使用同一条 1 MSPS OTA 波形作为标签，低采样输入只是
 它的固定 q 相位抽取。训练数据不做 CFO、SFO、幅度或复增益校正。
 
-以下命令用固定 seed 从物理包中选择 24 个，并按物理包严格划成
-14/5/5（训练/验证/测试）的 6:2:2；同一包的两个 ADC phase 与四个 q phase
-绝不会跨 split。`validation` 只用于早停和选择最佳权重，`test` 不参与训练。
+以下命令用固定 seed 从物理包中选择 100 个，并按物理包严格划成
+60/20/20（训练/验证/测试）的 6:2:2；同一包的两个 ADC phase 与四个 q phase
+绝不会跨 split。每个物理包共有 8 个降采样 view，因此真正参与梯度更新的是
+`60 x 8 = 480` 个训练 view；validation 只用于早停，test 完全留给最终评测。
 
 ```bash
 cd /root/autodl-tmp/rfsr-run/finetune
@@ -239,19 +236,19 @@ export PYTHONPATH=/root/lora-rfsr-savaux/third_party/rfsr
 
 python -B /root/lora-rfsr-savaux/third_party/rfsr/rfsr/nn/nn.py \
   --model model0v0hl \
-  --batch_size 1 \
+  --batch_size 3 \
   --osf 4 --dsf 8 --dataset_size 250 \
   --num_epochs 100 \
   --learning_rate 0.0001 --weight_decay 1e-5 --optimizer adam \
   --ota \
   --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
   --ota-target received \
-  --ota-max-groups 24 --ota-split-seed 42 \
+  --ota-max-groups 100 --ota-split-seed 42 \
   --early-stop-patience 10 \
   --pretrained /root/autodl-tmp/rfsr-run/pretrain/checkpoints/model_model0v0_bs5_osf4_ds250_lr0.001_wd1e-05_synthref_random_snr-22to10_cfo0_stonone.pth
 ```
 
-要使用全部 OTA 物理包，去掉 `--ota-max-groups 24`。训练完成后，使用
+要使用全部 OTA 物理包，去掉 `--ota-max-groups 100`。训练完成后，使用
 采集机的 GNU Radio/gr-lora 环境运行以下测试。它会从完整 LoRa 接收链的
 packet detector 开始，比较 250 kSPS 原始输入、作者插值、RFSR 输出与原生
 1 MSPS OTA，并以 metadata 中的完整 frame 和 CRC 统计成功数：
@@ -263,15 +260,50 @@ export PYTHONPATH=/root/lora-rfsr-savaux/third_party/rfsr
 
 python -B tools/evaluate_rfsr_ota_decode.py \
   --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
-  --ota-max-groups 24 --ota-split-seed 42 \
-  --checkpoint /root/autodl-tmp/rfsr-run/finetune/checkpoints/model_model0v0hl_bs1_osf4_ds250_lr0.0001_wd1e-05_ota_received_g24_dsf8.pth \
+  --ota-max-groups 100 --ota-split-seed 42 \
+  --checkpoint "$CHECKPOINT" \
   --output /root/autodl-tmp/rfsr-run/finetune/ota_decode_test.json \
   --device cuda
 ```
 
 可在上述测试命令加入 `--extra-snr-db -10`，在每个 held-out 高采样包上先加入
 一个固定 seed 的公共 AWGN 实现，再由它抽取低采样输入。该噪声只用于测试，
-不改变训练数据或网络前的同步流程。
+不改变训练数据。注意这是旧的完整 CRC 链压力测试，噪声位于 RFSR 之前；不要
+用它代替下面“clean FrameSync 后再加噪”的 Savaux SER 实验。
+
+要统计“干净 RFSR 输出先同步、随后固定同步信息加噪”的 Savaux payload SER，
+使用下面的专用入口。参考 metadata 只在全部 SNR 的硬判决完成后读取，不会向
+同步或解调提供包边界、频偏或符号真值：
+
+```bash
+python -B tools/evaluate_rfsr_savaux_ser.py \
+  --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
+  --ota-max-groups 100 --ota-split-seed 42 \
+  --checkpoint "$CHECKPOINT" \
+  --output /root/autodl-tmp/rfsr-run/finetune/rfsr_savaux_ser.json \
+  --device cuda --include-clean-output \
+  --method rfsr_1msps --method native_1msps \
+  --extra-snr-start-db -20 --extra-snr-stop-db -34 --extra-snr-step-db -0.25 \
+  --noise-seed 20260728 --noise-seed-count 5
+```
+
+输出 JSON 的
+`split_manifest` 会保存三组完整 UID、数量、两两 overlap 列表及 `disjoint=true`，
+因此每次测试结果都能独立审计数据泄漏。默认只跑 `rfsr_1msps`；可重复添加
+`--method interpolation_1msps` 和 `--method native_1msps` 作为配对对照。
+每个物理包只在不额外加噪的 RFSR 输出上运行一次 FrameSync；随后所有 SNR
+条件都复用该结果。SER 只统计干净 FrameSync 成功包中、能由 frame bytes 唯一
+确定的 payload symbol；干净同步失败包不进入 SER 分子或分母。最后一个不完整
+interleaver block 的发射机私有 padding symbols 没有可靠真值，明确排除在分母外。
+RFSR 和 native 使用原生 1 MS/s OTA 的同一个包级功率作为噪声标尺，并叠加完全
+相同的复 AWGN 实现。`aggregate_by_snr` 汇总所有 seed；其中
+`paired_rfsr_vs_native` 只比较两条支路共同 clean-sync 成功的相同包/seed 尝试。
+
+OTA 微调现在会在 checkpoint 旁写入同名 `_split_manifest.json`，并在续训前
+校验 seed、target 和三组物理包 UID；不一致时直接拒绝续训。SER 工具默认也
+要求该 sidecar 与本次 `--ota-max-groups/--ota-split-seed` 完全匹配。只有确实
+无法补齐来源的旧模型才使用 `--allow-unbound-checkpoint`，此时结果会明确标为
+`verified=false`，不能当作严格 held-out 结论。
 
 ## 3. 数据不要上传进 Git
 
@@ -307,7 +339,7 @@ Windows 没有 `rsync` 时可用 `scp`；数据更大时建议对象存储或租
 1. 固定 PHY 参数和采集增益，采集高 SNR、低 SNR、noise-only。
 2. 得到能够对齐的 250 ksample/s 与 1 Msample/s 数据及符号真值。
 3. 在未改模型的情况下复现 RFSR 官方插值和 checkpoint。
-4. 跑通五臂探针，再扩成 packet/SER/PER 评估。
+4. 跑通 held-out OTA 上的 RFSR + FrameSync + Savaux 条件 SER，再扩充物理包和噪声种子。
 5. 只有在数据证明 RFSR 的输入契约或误差模式不适配时，才进入窗口训练、微调或模型改造。
 
 当前研究交接以 `docs/HANDOFF_20260727.md` 为准；更早的 RF-SR 代码分析和

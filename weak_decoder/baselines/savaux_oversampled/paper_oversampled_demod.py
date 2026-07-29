@@ -28,6 +28,65 @@ CfoCorrectionMode = Literal["none", "symbol", "continuous"]
 
 
 @dataclass(frozen=True)
+class _WrappedTailKernel:
+    """Eq. (36) 快速卷积中仅由 DFT 长度决定的常量。"""
+
+    forward_chirp: np.ndarray
+    reverse_chirp_fft: np.ndarray
+    fft_length: int
+
+
+@dataclass(frozen=True)
+class _SavauxKernel:
+    """一个 SF/OSR 组合可在所有 symbol 间复用的 Savaux 常量。"""
+
+    branch_weights: np.ndarray
+    wrap_phases: np.ndarray
+
+
+@lru_cache(maxsize=16)
+def _wrapped_tail_kernel(n_bins: int) -> _WrappedTailKernel:
+    """缓存 Eq. (36) 的 chirp-z 卷积核，避免每个 symbol 重建它。"""
+
+    length = int(n_bins)
+    if length <= 0:
+        raise ValueError("n_bins must be positive")
+    indexes = np.arange(length, dtype=np.float64)
+    forward_chirp = np.exp(1j * np.pi * indexes * indexes / float(length))
+    reverse_chirp = np.exp(-1j * np.pi * indexes * indexes / float(length))
+    fft_length = 1 << int((2 * length - 1).bit_length())
+    reverse_chirp_fft = np.fft.fft(reverse_chirp, fft_length)
+    forward_chirp.setflags(write=False)
+    reverse_chirp_fft.setflags(write=False)
+    return _WrappedTailKernel(
+        forward_chirp=forward_chirp,
+        reverse_chirp_fft=reverse_chirp_fft,
+        fft_length=fft_length,
+    )
+
+
+@lru_cache(maxsize=16)
+def _savaux_kernel(sf: int, os_factor: int) -> _SavauxKernel:
+    """缓存 branch 的 Eq. (37) 相位和 Eq. (36) wrap 相位。"""
+
+    n_bins = 1 << int(sf)
+    os_value = _validate_os_factor(os_factor)
+    bins = np.arange(n_bins, dtype=np.float64)
+    branches = np.arange(os_value, dtype=np.float64)[:, np.newaxis]
+    branch_weights = np.exp(
+        -2j * np.pi * branches * bins[np.newaxis, :]
+        / float(n_bins * os_value)
+    )
+    wrap_phases = np.exp(2j * np.pi * branches[:, 0] / float(os_value))
+    branch_weights.setflags(write=False)
+    wrap_phases.setflags(write=False)
+    return _SavauxKernel(
+        branch_weights=branch_weights,
+        wrap_phases=wrap_phases,
+    )
+
+
+@dataclass(frozen=True)
 class PaperOversampledDemodResult:
     """单个 symbol 的论文 baseline 解调结果。
 
@@ -61,7 +120,8 @@ def _validate_os_factor(os_factor: int) -> int:
     return value
 
 
-def _oversampled_downchirp(
+@lru_cache(maxsize=512)
+def _cached_oversampled_downchirp(
     sf: int,
     os_factor: int,
     cfo_int: int = 0,
@@ -81,36 +141,69 @@ def _oversampled_downchirp(
     # 小数 CFO 用额外相位旋转补偿。
     reference = build_upchirp(sf=sf, symbol_id=int(cfo_int), os_factor=os_value)
     frac_cfo = np.exp(-2j * np.pi * float(cfo_frac) * n / float(n_bins * os_value))
-    return (np.conjugate(reference) * frac_cfo).astype(np.complex64)
+    result = (np.conjugate(reference) * frac_cfo).astype(np.complex64)
+    # 调用方只读该缓存；设为只读可以尽早发现意外原地修改。
+    result.setflags(write=False)
+    return result
 
 
-@lru_cache(maxsize=32)
-def _branch_dft_matrix(sf: int, os_factor: int, branch_index: int) -> np.ndarray:
-    """返回论文 Eq. (36) 的 branch 矩阵 F^(q,ro)。
+def _oversampled_downchirp(
+    sf: int,
+    os_factor: int,
+    cfo_int: int = 0,
+    cfo_frac: float = 0.0,
+) -> np.ndarray:
+    """返回已缓存的 CFO-aware downchirp。"""
 
-    q=0 时它就是普通 DFT，调用方直接用 FFT。
-    q>0 时，第 k 行会把 wrap 后缀 p >= N-k 乘上 exp(j*2*pi*q/ro)，
-    对应 Eq. (35)-(36) 中 Heaviside 阶跃项带来的 branch-specific 相位。
+    return _cached_oversampled_downchirp(
+        int(sf), int(os_factor), int(cfo_int), float(cfo_frac)
+    )
+
+
+def _wrapped_tail_dft_batch(branches: np.ndarray) -> np.ndarray:
+    """批量计算多个 branch 的 Eq. (36) wrap-tail DFT。
+
+    这与逐 branch 调用 :func:`_wrapped_tail_dft` 数学等价，但把同一 symbol
+    的多个 branch 放进一次沿 axis=0 的 FFT/IFFT。SF12、OSR=4 时可避免
+    重复创建三份相同卷积核和六次 Python/FFT 调度。
     """
 
-    n_bins = 1 << int(sf)
-    os_value = _validate_os_factor(os_factor)
-    q = int(branch_index)
-    if not (0 <= q < os_value):
-        raise ValueError(f"branch_index must be in [0, {os_value}), got {branch_index}")
+    values = np.asarray(branches, dtype=np.complex128)
+    if values.ndim != 2:
+        raise ValueError("branches must have shape (n_bins, branch_count)")
+    n_bins, branch_count = map(int, values.shape)
+    if n_bins <= 0 or branch_count <= 0:
+        raise ValueError("branches must be non-empty")
+    kernel = _wrapped_tail_kernel(n_bins)
+    lhs = np.zeros((n_bins, branch_count), dtype=np.complex128)
+    lhs[1:] = values[:0:-1] * kernel.forward_chirp[1:, np.newaxis]
+    convolution = np.fft.ifft(
+        np.fft.fft(lhs, kernel.fft_length, axis=0)
+        * kernel.reverse_chirp_fft[:, np.newaxis],
+        axis=0,
+    )[:n_bins]
+    tail = kernel.forward_chirp[:, np.newaxis] * convolution
+    tail[0] = 0.0
+    return tail.astype(np.complex64)
 
-    k = np.arange(n_bins, dtype=np.float64)[:, None]
-    p = np.arange(n_bins, dtype=np.float64)[None, :]
-    kernel = np.exp(-2j * np.pi * k * p / float(n_bins))
-    if q == 0:
-        return kernel.astype(np.complex64)
 
-    phase = np.ones((n_bins, n_bins), dtype=np.complex64)
-    # 对候选 bin k 来说，LoRa chirp wrap 发生在 p >= N-k。
-    # 论文的 branch DFT 与普通 DFT 唯一区别就是这段 suffix 的常相位。
-    tail = (k > 0) & (p >= (float(n_bins) - k))
-    phase[tail] = np.complex64(np.exp(2j * np.pi * q / float(os_value)))
-    return (kernel * phase).astype(np.complex64)
+def _wrapped_tail_dft(branch: np.ndarray) -> np.ndarray:
+    """同时计算所有候选 bin 的 wrap 后缀 DFT。
+
+    对候选 ``k``，论文 Eq. (36) 需要额外乘相位的部分是
+    ``p=N-k,...,N-1``。令 ``m=N-p`` 后，该三角和为
+
+    ``T[k] = sum_{m=1}^k x[N-m] exp(j*2*pi*k*m/N)``。
+
+    使用 ``2km=k^2+m^2-(k-m)^2`` 可将全部 ``T[k]`` 写成一次线性
+    卷积，以 FFT 在 ``O(N log N)`` 时间和 ``O(N)`` 内存中计算。原来的
+    稠密 ``N x N`` 矩阵在 SF12 下每个 branch 约 128 MiB，无法用于整包 SER。
+    """
+
+    values = np.asarray(branch, dtype=np.complex64)
+    if values.ndim != 1:
+        raise ValueError("branch must be one-dimensional")
+    return _wrapped_tail_dft_batch(values[:, np.newaxis])[:, 0]
 
 
 def _paper_branch_spectrum(
@@ -129,10 +222,17 @@ def _paper_branch_spectrum(
     if branch.size != n_bins:
         raise ValueError(f"branch has {branch.size} samples, expected {n_bins}")
     q = int(branch_index)
+    os_value = _validate_os_factor(os_factor)
+    if not (0 <= q < os_value):
+        raise ValueError(
+            f"branch_index must be in [0, {os_value}), got {branch_index}"
+        )
+    spectrum = np.fft.fft(branch)
     if q == 0:
-        spectrum = np.fft.fft(branch)
-    else:
-        spectrum = _branch_dft_matrix(sf, os_factor, q) @ branch
+        return (spectrum / math.sqrt(float(n_bins))).astype(np.complex64)
+
+    wrap_phase = _savaux_kernel(sf, os_value).wrap_phases[q]
+    spectrum = spectrum + (wrap_phase - 1.0) * _wrapped_tail_dft(branch)
     return (spectrum / math.sqrt(float(n_bins))).astype(np.complex64)
 
 
@@ -152,13 +252,12 @@ def combine_paper_branch_spectra(
     if len(spectra) != os_value:
         raise ValueError(f"got {len(spectra)} branch spectra, expected {os_value}")
 
-    k = np.arange(n_bins, dtype=np.float64)
+    weights = _savaux_kernel(int(math.log2(n_bins)), os_value).branch_weights
     combined = np.zeros(n_bins, dtype=np.complex128)
     for q, spectrum in enumerate(spectra):
         # Eq. (37): 每个 branch q 的同一个候选 k 需要乘
         # exp(-j*2*pi*q*k/(N*R)) 后再相干相加。
-        weight = np.exp(-2j * np.pi * float(q) * k / float(n_bins * os_value))
-        combined += weight * spectrum.astype(np.complex128)
+        combined += weights[q] * spectrum.astype(np.complex128)
     return combined.astype(np.complex64)
 
 
@@ -214,14 +313,18 @@ def paper_oversampled_spectrum(
     # 第一步：整段过采样 symbol 先 dechirp。
     dechirped = (symbol * downchirp).astype(np.complex64)
 
+    # 第二步：按 OSR 拆成 branch q，即 n = R*p + q。这里一次计算全部 branch
+    # 的普通 FFT 和 wrap-tail 卷积；结果仍保持原先逐 branch Eq. (34)-(36) 定义。
+    branch_samples = dechirped.reshape(n_bins, os_value)
+    spectra = np.fft.fft(branch_samples, axis=0) / math.sqrt(float(n_bins))
+    if os_value > 1:
+        tails = _wrapped_tail_dft_batch(branch_samples[:, 1:])
+        kernel = _savaux_kernel(int(sf), os_value)
+        spectra[:, 1:] += (
+            (kernel.wrap_phases[1:] - 1.0)[np.newaxis, :] * tails
+        ) / math.sqrt(float(n_bins))
     branch_spectra = tuple(
-        _paper_branch_spectrum(
-            # 第二步：按 OSR 拆成 branch q，即 n = R*p + q。
-            dechirped_branch=dechirped[q::os_value],
-            sf=sf,
-            os_factor=os_value,
-            branch_index=q,
-        )
+        np.asarray(spectra[:, q], dtype=np.complex64)
         for q in range(os_value)
     )
     return (

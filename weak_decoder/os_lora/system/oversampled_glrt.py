@@ -1,15 +1,19 @@
-"""Structure-preserving oversampled LoRa detector.
+"""保持 LoRa 结构的过采样 GLRT/GLS 算法库。
 
-The detector keeps two views of one oversampled symbol:
+该模块保存此前 OS-LoRa 研究形成的可复用核心算法，目前不接入
+``RFSR -> FrameSync -> Savaux`` 主链。保留它是为了后续需要时能够在不恢复历史
+实验脚本的情况下重新比较 GLS，但当前结果不得宣称使用了这里的增强方法。
 
-* candidate-aligned Savaux polyphase observations, whose dimension is only
-  ``OSR`` and can therefore be whitened with an ordinary covariance matrix;
-* the two full-rate dechirped FFT components separated by ``Fs - BW``, whose
-  phase-aligned coherent/incoherent power ratio provides candidate evidence.
+算法包含两类观察：
 
-Payload ground truth is deliberately absent from this module. Noise models are
-estimated from noise-only/off-packet windows and phase/frequency lines are
-fitted from known pre-payload symbols by the experiment or receiver.
+* Savaux polyphase branch 观察。每个候选 bin 只有 ``OSR`` 维，因此噪声模型是
+  很小的 ``OSR x OSR`` 协方差，可用普通 GLS 白化；不会构造整符号长度的巨型
+  ``RN x RN`` 协方差。
+* 完整采样率 dechirp 后相隔 ``Fs-BW`` 的双分量观察。它利用相位对齐后的相干/
+  非相干功率关系重排少量候选，属于后续历史消融，不是当前 Savaux 主链的一部分。
+
+本模块刻意不接收 payload ground truth。branch 噪声协方差只能从包外纯噪声窗
+估计；频率、相位和折返时序模型只能由前导码、头部等 payload 之前的已知结构拟合。
 """
 
 from __future__ import annotations
@@ -30,6 +34,11 @@ RerankMode = Literal["weighted", "confidence_gate"]
 CoherentRerankMode = Literal["joint", "coherence", "confidence_gate"]
 
 
+# ---------------------------------------------------------------------------
+# Savaux branch 观察与低维噪声协方差
+# ---------------------------------------------------------------------------
+
+
 def _validate_os_factor(os_factor: int) -> int:
     value = int(os_factor)
     if value <= 0:
@@ -38,6 +47,8 @@ def _validate_os_factor(os_factor: int) -> int:
 
 
 def _validate_windows(noise_windows: np.ndarray, symbol_samples: int) -> np.ndarray:
+    """把噪声样本规范为“窗口数 x 单符号采样数”，并要求至少两个快照。"""
+
     windows = np.asarray(noise_windows, dtype=np.complex64)
     if windows.ndim == 1:
         if windows.size % int(symbol_samples) != 0:
@@ -56,13 +67,13 @@ def _regularized_covariance(
     snapshots: np.ndarray,
     diagonal_loading: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return a loaded covariance and its Hermitian pseudo-inverse."""
+    """估计 Hermitian 协方差，加入对角加载并返回其伪逆。"""
 
     values = np.asarray(snapshots, dtype=np.complex128)
     if values.ndim != 2 or values.shape[0] < 2:
         raise ValueError("snapshots must be a two-dimensional matrix with at least two rows")
     centered = values - np.mean(values, axis=0, keepdims=True)
-    # Each row is a complex column-vector observation y, so C_ij=E[y_i conj(y_j)].
+    # 每一行是一份复数列向量观察 y，因此 C_ij = E[y_i conj(y_j)]。
     covariance = centered.T @ centered.conj() / float(max(1, centered.shape[0] - 1))
     covariance = 0.5 * (covariance + covariance.conj().T)
     dimension = int(covariance.shape[0])
@@ -79,6 +90,8 @@ def _oversampled_downchirp(
     cfo_int: int = 0,
     cfo_frac: float = 0.0,
 ) -> np.ndarray:
+    """生成同时补偿整数和小数 CFO 的完整过采样 downchirp。"""
+
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
     length = n_bins * os_value
@@ -95,7 +108,7 @@ def _candidate_dft_kernels(
     branch_index: int,
     candidate_bins: tuple[int, ...],
 ) -> np.ndarray:
-    """Savaux candidate-specific DFT rows for selected candidate bins."""
+    """为指定候选生成 Savaux Eq.36 的 branch-specific DFT 行。"""
 
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
@@ -120,7 +133,7 @@ def aligned_branch_observations(
     branch_spectra: Sequence[np.ndarray],
     os_factor: int,
 ) -> np.ndarray:
-    """Return ``Y[k,q]`` after Savaux's deterministic branch phase alignment."""
+    """按 Savaux 确定性相位项对齐 branch，返回候选 ``k`` 的 OSR 维观察。"""
 
     os_value = _validate_os_factor(os_factor)
     spectra = tuple(np.asarray(item, dtype=np.complex64) for item in branch_spectra)
@@ -140,6 +153,8 @@ def aligned_branch_observations(
 
 @dataclass(frozen=True)
 class BranchNoiseModel:
+    """Savaux branch 的低维噪声协方差、伪逆和 steering 信息。"""
+
     covariance: np.ndarray
     inverse_covariance: np.ndarray
     steering: np.ndarray
@@ -150,7 +165,7 @@ class BranchNoiseModel:
 
 
 def identity_branch_noise_model(os_factor: int) -> BranchNoiseModel:
-    """Construct the white-noise model, for which branch GLS equals Savaux."""
+    """构造白噪声单位模型；在该模型下 branch GLS 退化为普通 Savaux。"""
 
     os_value = _validate_os_factor(os_factor)
     covariance = np.eye(os_value, dtype=np.complex128)
@@ -176,10 +191,11 @@ def estimate_branch_noise_model(
     diagonal_loading: float = 0.05,
     covariance_mode: Literal["pooled", "per_bin"] = "pooled",
 ) -> BranchNoiseModel:
-    """Estimate pooled or candidate-wise ``OSR x OSR`` branch covariance.
+    """从纯噪声窗口估计 pooled 或逐候选 ``OSR x OSR`` branch 协方差。
 
-    ``per_bin`` stores ``N`` separate small matrices with shape
-    ``(N, OSR, OSR)``.  It still never constructs an ``RN x RN`` covariance.
+    ``pooled`` 把多个训练 bin 的快照合并成一个协方差；``per_bin`` 为每个候选
+    保存一个小矩阵，形状是 ``(N, OSR, OSR)``。两种模式都不会构造
+    ``RN x RN`` 的整符号协方差。
     """
 
     n_bins = 1 << int(sf)
@@ -254,6 +270,8 @@ def estimate_branch_noise_model(
 
 @dataclass(frozen=True)
 class BranchGLSResult:
+    """全部候选的 GLS 分数、最佳 bin 和 Top-L 诊断。"""
+
     scores: np.ndarray
     selected_bin: int
     top_candidates: tuple[int, ...]
@@ -262,6 +280,8 @@ class BranchGLSResult:
 
 @dataclass(frozen=True)
 class BranchSteeringEstimate:
+    """由包内已知符号估计出的 branch 响应及其可信度。"""
+
     steering: np.ndarray
     rank_one_fraction: float
     observation_count: int
@@ -269,7 +289,7 @@ class BranchSteeringEstimate:
 
 @dataclass(frozen=True)
 class HeaderBinCalibration:
-    """Consensus estimate of a packet-wide residual integer-bin offset."""
+    """整包共享的残余整数 bin 偏移估计。"""
 
     correction_bins: int
     consensus: float
@@ -282,7 +302,11 @@ def estimate_header_bin_correction(
     n_bins: int,
     minimum_consensus: float = 0.75,
 ) -> HeaderBinCalibration:
-    """Use the explicit-header 1 mod 4 bin constraint for +/-1 calibration."""
+    """利用显式头 ``raw_bin = 1 (mod 4)`` 约束校准正负一个 bin 的偏差。
+
+    这里只接受头部已知结构，不读取 payload 真值。多个头部符号对同一余数达成
+    足够共识时才启用修正，避免单个错误头部 bin 把整包拖偏。
+    """
 
     if int(n_bins) <= 0 or int(n_bins) % 4:
         raise ValueError("n_bins must be a positive multiple of four")
@@ -307,7 +331,12 @@ def estimate_header_bin_correction(
 def estimate_branch_steering(
     observations: np.ndarray,
 ) -> BranchSteeringEstimate:
-    """Estimate a packet-local branch response from known symbols by rank one SVD."""
+    """用包内已知符号的秩一 SVD 估计 packet-local branch 响应。
+
+    每个已知符号先按自身范数归一化，避免大能量符号主导估计；随后取第一右奇异
+    向量作为 branch steering，并统一其公共相位和范数。``rank_one_fraction``
+    表示观察能量中可由一个公共 branch 响应解释的比例。
+    """
 
     values = np.asarray(observations, dtype=np.complex128)
     if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
@@ -342,7 +371,10 @@ def branch_gls_scores(
     top_l: int = 8,
     steering: np.ndarray | None = None,
 ) -> BranchGLSResult:
-    """Score all LoRa candidates with the OSR-dimensional GLS statistic."""
+    """使用 OSR 维 GLS 统计量给全部 LoRa 候选打分。"""
+
+    # 先应用 Savaux 的确定性 branch 相位对齐，再以 C^-1 对 steering 和观察
+    # 做匹配；分母 information 用于消除不同协方差尺度带来的分数偏置。
 
     observations = aligned_branch_observations(branch_spectra, os_factor=os_factor)
     model = noise_model or identity_branch_noise_model(os_factor)
@@ -391,6 +423,11 @@ def branch_gls_scores(
     return BranchGLSResult(scores, int(candidates[0]), candidates, observations)
 
 
+# ---------------------------------------------------------------------------
+# 完整采样率双峰历史消融；当前 RFSR + FrameSync + Savaux 主链不调用
+# ---------------------------------------------------------------------------
+
+
 def extract_full_rate_dechirped(
     samples: np.ndarray,
     start_sample: int,
@@ -401,7 +438,11 @@ def extract_full_rate_dechirped(
     header_start_sample: int | None = None,
     cfo_correction_mode: CfoCorrectionMode = "continuous",
 ) -> np.ndarray:
-    """Extract one full-rate symbol and apply the receiver's CFO convention."""
+    """截取一个完整采样率符号，并按接收机约定补偿 CFO。
+
+    ``symbol`` 模式只修正符号内部的频率斜率；``continuous`` 还根据该符号相对
+    header 起点的位置补偿公共相位，因此跨符号相位模型必须使用后者。
+    """
 
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
@@ -429,6 +470,8 @@ def extract_full_rate_dechirped(
 
 
 def full_rate_spectrum(dechirped: np.ndarray) -> np.ndarray:
+    """计算单位能量归一化的完整采样率 DFT。"""
+
     values = np.asarray(dechirped, dtype=np.complex64)
     if values.ndim != 1 or values.size == 0:
         raise ValueError("dechirped must be a non-empty one-dimensional array")
@@ -436,7 +479,7 @@ def full_rate_spectrum(dechirped: np.ndarray) -> np.ndarray:
 
 
 def fractional_dft(dechirped: np.ndarray, bins: Sequence[float]) -> np.ndarray:
-    """Evaluate the normalized DFT at a small set of fractional bin locations."""
+    """只在少量小数 bin 位置直接计算归一化 DFT，避免整段零填充 FFT。"""
 
     values = np.asarray(dechirped, dtype=np.complex64)
     frequencies = np.asarray(tuple(float(value) for value in bins), dtype=np.float64)
@@ -452,7 +495,7 @@ def estimate_fractional_peak_offset(
     raw_bin: int,
     max_abs_offset: float = 0.5,
 ) -> tuple[float, float]:
-    """Three-bin parabolic estimate of the residual primary-peak offset."""
+    """用主峰左右三个 bin 的抛物线插值估计残余小数 bin 偏差。"""
 
     values = np.asarray(spectrum)
     length = int(values.size)
@@ -467,6 +510,8 @@ def estimate_fractional_peak_offset(
 
 @dataclass(frozen=True)
 class LinearFrequencyModel:
+    """小数频偏随符号序号线性变化的拟合模型。"""
+
     slope_bins_per_symbol: float
     intercept_bins: float
     observation_count: int
@@ -478,6 +523,8 @@ class LinearFrequencyModel:
 
 @dataclass(frozen=True)
 class LinearPhaseModel:
+    """双峰相位差随符号序号线性变化的拟合模型。"""
+
     slope_rad_per_symbol: float
     intercept_rad: float
     observation_count: int
@@ -488,6 +535,8 @@ class LinearPhaseModel:
 
 
 def _weighted_line(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> tuple[float, float, np.ndarray]:
+    """加权最小二乘直线，返回斜率、截距和逐点残差。"""
+
     safe = np.maximum(np.asarray(weights, dtype=np.float64), 1e-9)
     x0 = float(np.average(x, weights=safe))
     y0 = float(np.average(y, weights=safe))
@@ -504,6 +553,8 @@ def fit_frequency_line(
     weights: Sequence[float] | None = None,
     fixed_slope_bins_per_symbol: float | None = None,
 ) -> LinearFrequencyModel:
+    """拟合频偏轨迹；可固定 SFO 已知时对应的理论斜率。"""
+
     x = np.asarray(symbol_indices, dtype=np.float64)
     y = np.asarray(offsets, dtype=np.float64)
     if x.size != y.size or x.size == 0:
@@ -524,6 +575,8 @@ def fit_frequency_line(
 
 @dataclass(frozen=True)
 class DualPeakObservation:
+    """一个已知符号的双峰功率、相位及质量观察。"""
+
     symbol_index: float
     raw_bin: int
     fractional_offset: float
@@ -535,7 +588,7 @@ class DualPeakObservation:
 
 @dataclass(frozen=True)
 class KnownDualPeakPair:
-    """Complex fold-pair observation of a known pre-payload symbol."""
+    """payload 前一个已知符号的复数折返双峰观察。"""
 
     symbol_index: float
     raw_bin: int
@@ -550,7 +603,7 @@ class KnownDualPeakPair:
 
 @dataclass(frozen=True)
 class FoldTimingModel:
-    """Packet timing trajectory used by the exact fold-pair steering model."""
+    """供精确折返双峰 steering 使用的包内定时轨迹。"""
 
     reference_symbol_index: float
     offset_chips_at_reference: float
@@ -575,6 +628,8 @@ def observe_dual_peak(
     fractional_offset: float,
     symbol_index: float,
 ) -> DualPeakObservation:
+    """在 ``k`` 与 ``k + (R-1)N`` 处观察一个候选的完整采样率双峰。"""
+
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
     length = n_bins * os_value
@@ -606,7 +661,7 @@ def observe_known_dual_peak_pair(
     fractional_offset: float,
     symbol_index: float,
 ) -> KnownDualPeakPair:
-    """Return the two complex full-rate components for a known symbol."""
+    """返回已知符号在两个完整采样率频点上的复数分量。"""
 
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
@@ -634,7 +689,11 @@ def fit_phase_line(
     max_residual_rad: float = 0.75 * math.pi,
     fixed_slope_rad_per_symbol: float | None = None,
 ) -> LinearPhaseModel:
-    """Fit a robust unwrapped phase line from known pre-payload symbols."""
+    """从 payload 前的已知符号稳健拟合展开后的相位直线。
+
+    先按 ``quality`` 丢弃双峰过弱的观察，再对相位展开并加权拟合；首次拟合后
+    会剔除相位残差过大的离群点。若理论斜率已知，则只拟合截距。
+    """
 
     usable = [item for item in observations if float(item.quality) >= float(min_quality)]
     if not usable:
@@ -669,6 +728,8 @@ def fit_phase_line(
 
 @dataclass(frozen=True)
 class PairNoiseModel:
+    """完整采样率双峰的 2x2 噪声协方差模型。"""
+
     covariance: np.ndarray
     inverse_covariance: np.ndarray
     snapshot_count: int
@@ -677,6 +738,8 @@ class PairNoiseModel:
 
 
 def identity_pair_noise_model() -> PairNoiseModel:
+    """构造白噪声下的单位双峰协方差。"""
+
     covariance = np.eye(2, dtype=np.complex128)
     return PairNoiseModel(covariance, covariance.copy(), 0, 0.0)
 
@@ -699,13 +762,11 @@ def fold_pair_steering(
     os_factor: int,
     timing_offset_chips: float,
 ) -> np.ndarray:
-    """Exact two-bin response of the two dechirped chirp segments.
+    """计算两个 dechirp chirp 分段对双峰的精确响应。
 
-    Unlike a length-only ``[N-k, k]`` approximation, this expression retains
-    the cross leakage of each finite segment into the other component.  The
-    fold boundary and the segment phase jump are both candidate/timing aware.
-    A common complex scale is intentionally omitted because the downstream
-    GLRT eliminates it.
+    与只按长度写成 ``[N-k, k]`` 的近似不同，这里保留每个有限分段泄漏到另一
+    分量的交叉项；折返点和分段相位跳变都随候选 bin、定时偏差变化。公共复数
+    比例会在后续 GLRT 中消去，所以这里刻意不估计它。
     """
 
     n_bins = 1 << int(sf)
@@ -721,9 +782,10 @@ def fold_pair_steering(
         )
     )
     phase_jump = np.exp(2j * np.pi * tau)
+
     def root_sum(start: int, count: int, sign: float) -> complex:
-        # Integer-OSR roots repeat every R samples and every complete period
-        # sums to zero.  At most R-1 terms therefore need evaluation.
+        # 整数 OSR 的单位根每 R 点重复，完整周期之和为零，因此最多只需实际
+        # 计算 R-1 项，长符号也不会使这里的开销随 N 增长。
         remainder = int(count) % os_value
         if remainder == 0:
             return 0.0j
@@ -761,7 +823,11 @@ def fit_fold_timing_model(
     pair_noise_model: PairNoiseModel | None = None,
     grid_points: int = 401,
 ) -> FoldTimingModel:
-    """Fit the pre-payload timing offset using candidate-aware pair steering."""
+    """用候选相关的双峰 steering 网格搜索 payload 前定时偏差。
+
+    每个网格点都在所有已知符号上计算白化后的模板一致性，选择平均一致性最高
+    的定时偏差；``grid_contrast`` 用最佳值与中位数之差描述峰是否清晰。
+    """
 
     usable = tuple(observations)
     if not usable:
@@ -803,7 +869,7 @@ def estimate_pair_noise_model(
     diagonal_loading: float = 0.05,
     covariance_mode: Literal["pooled", "per_bin"] = "pooled",
 ) -> PairNoiseModel:
-    """Estimate pooled or candidate-wise 2x2 full-rate pair covariance."""
+    """从纯噪声窗估计 pooled 或逐候选的 2x2 双峰协方差。"""
 
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
@@ -893,6 +959,8 @@ def _pair_steering(
 
 @dataclass(frozen=True)
 class DualPeakCandidateScore:
+    """一个 Top-L 候选在 branch 与双峰域中的完整诊断分数。"""
+
     raw_bin: int
     branch_score: float
     branch_loss_db: float
@@ -908,6 +976,8 @@ class DualPeakCandidateScore:
 
 @dataclass(frozen=True)
 class DualPeakRerankResult:
+    """双峰重排的最终选择及全部候选诊断。"""
+
     selected_bin: int
     branch_selected_bin: int
     candidate_scores: tuple[DualPeakCandidateScore, ...]
@@ -921,11 +991,10 @@ def coherent_combination_ratio(
     secondary: complex,
     predicted_phase_rad: float,
 ) -> tuple[float, complex, float]:
-    """Return normalized coherent power after aligning the secondary peak.
+    """对齐第二个峰后，返回归一化相干功率、合并复数值和非相干功率。
 
-    The ratio is ``|A1 + A2 exp(-j phi)|^2 / (2 (|A1|^2 + |A2|^2))``.
-    It lies in ``[0, 1]`` and removes absolute candidate energy, leaving the
-    phase-coherence evidence requested by the second-stage detector.
+    比值为 ``|A1 + A2 exp(-j phi)|^2 / (2 (|A1|^2 + |A2|^2))``，范围
+    为 ``[0, 1]``。归一化去掉了候选绝对能量，只留下第二阶段需要的相位相干证据。
     """
 
     first = complex(primary)
@@ -954,15 +1023,12 @@ def rerank_coherent_fold_candidates(
     max_override_loss_db: float = 0.15,
     allow_override: bool = True,
 ) -> DualPeakRerankResult:
-    """Rerank Top-L GLS candidates with phase-aligned dual-peak coherence.
+    """按相位对齐后的双峰相干性重排 branch Top-L 候选。
 
-    For candidate ``k``, the two full-rate DFT positions are
-    ``k + f`` and ``k + (R - 1)N + f``, which are separated by
-    ``Fs - BW`` in Hz and are equivalent to ``k + f`` and ``k + f - N``
-    modulo ``RN``.  When ``timing_offset_chips`` is available, only the
-    candidate-dependent relative phase of the finite-fold response is used;
-    ``phase_rad`` is its calibration fallback.  No pair covariance or
-    fold-amplitude template is used.
+    候选 ``k`` 的两个完整采样率 DFT 位置为 ``k+f`` 与
+    ``k+(R-1)N+f``，二者实际频率相差 ``Fs-BW``。有定时估计时，使用有限折返
+    响应中随候选变化的相对相位；否则退回 ``phase_rad``。这个变体不使用双峰
+    协方差或折返幅度模板。
     """
 
     scores = np.asarray(branch_scores, dtype=np.float64)
@@ -1094,13 +1160,11 @@ def rerank_dual_peak_candidates(
     max_override_loss_db: float = 0.10,
     allow_override: bool = True,
 ) -> DualPeakRerankResult:
-    """Rerank branch-GLS proposals using whitened dual-peak consistency.
+    """用白化后的双峰一致性重排 branch-GLS 提议。
 
-    ``allow_override=False`` still evaluates and returns every full-rate
-    candidate diagnostic, but preserves the branch-domain decision.  This is
-    useful in the white-noise regime, where the Savaux sum is already the
-    matched-filter sufficient statistic and a second projection must not be
-    treated as independent evidence.
+    ``allow_override=False`` 时仍计算并返回全部完整采样率诊断，但最终保持
+    branch 域判决。白噪声下 Savaux 合并本身已经是匹配滤波充分统计量，因此
+    第二次投影不能被误当成独立证据。
     """
 
     scores = np.asarray(branch_scores, dtype=np.float64)

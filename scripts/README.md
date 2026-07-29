@@ -1,10 +1,18 @@
 # scripts 解码链入口说明
 
-本目录放置可直接运行的命令行入口。具体算法实现主要位于
-`../weak_decoder/`，因此不是每个 Python 模块都要单独运行；通常由这里的编排脚本
-按顺序调用多个算法模块。
+本目录放置通用 IQ 同步和普通 FFT baseline 的命令行入口。当前 RFSR + Savaux
+联合评测入口位于 `../tools/evaluate_rfsr_savaux_ser.py`，它直接复用
+`weak_decoder` 中的同步与 Savaux 模块，不通过本目录的 CSV 中间文件。
 
-当前默认链路分为两个命令级阶段：
+当前联合评测链为：
+
+```text
+held-out OTA -> RFSR -> 干净输出上的 single_packet FrameSync
+             -> 固定 FrameSync -> 对 RFSR 输出加噪
+             -> synchronized_savaux -> 条件 SER
+```
+
+本目录仍保留下面两个命令级阶段，作为原始 IQ 调试和普通 FFT 对照：
 
 ```text
 原始 complex64 IQ
@@ -24,8 +32,8 @@
          -> fft_symbols.csv
 ```
 
-第一阶段与第二阶段目前通过 CSV 交接，不会由一个命令自动连续执行。这样便于复用
-耗时的同步结果，后续比较普通 FFT、OS-LoRa、GLS 和不同 baseline 时无需反复扫描整份 IQ。
+这两个 baseline 阶段通过 CSV 交接，便于复用耗时的同步结果；它们不等于当前
+RFSR + Savaux 联合评测入口。
 
 ## 推荐入口
 
@@ -155,7 +163,7 @@ header 和 LDRO symbol 还会按 LoRa 规则进一步除以 4。
 | `detect_weak_preamble.py` | 只运行前导码检测，适合独立调试门限 | 否，完整同步链已包含该步骤 |
 | `plot_payload_peak_trends.py` | 绘制已导出 payload FFT peak 的幅度/相位 | 诊断工具 |
 | `verify_payload_codec_alignment.py` | 用已知 symbol CSV 检查 payload codec 对齐 | 验证工具，不自动解码新 IQ |
-| `experiments/` | ground truth、baseline、消融和历史实验入口 | 不属于默认主链 |
+| `experiments/` | 已清理；旧的一次性 GT-bin 与路径 sweep 由 Git 历史保存 | 否 |
 
 ## weak_decoder 根模块与脚本的关系
 
@@ -176,7 +184,7 @@ chirp.py
 但当前默认 `run_header_first_demod.py` 只借助显式 header 确定 payload symbol 数，
 不会自动把 payload 一直解到 bytes/CRC。当前可信主链边界是逐 symbol FFT-bin 导出。
 
-以下 `decoding/` 模块是保留的 baseline/消融实现，不会被普通 FFT 或 GLS 主线静默调用：
+以下 `decoding/` 模块是保留的 baseline/消融实现，不会被普通 FFT 或当前 Savaux 主线静默调用：
 
 ```text
 adaptive_path_demod.py
@@ -184,33 +192,17 @@ structured_path_demod.py
 timing_path_demod.py
 ```
 
-## 固定帧 ground truth
-
-原生 `gr-lora_sdr::fft_demod` 的逐 symbol Top-K peak 导出入口为：
-
-```text
-experiments/export_peak_groundtruth.py
-```
-
-它可以使用 `--consensus-output` 将多次重复发送汇总成一行一个 symbol 位置的真值表。
-当前 Branch4 高 SNR 数据的正式结果位于：
-
-```text
-../data/groundtruth/branch4_fixed/high_snr/
-  sf10_bw125_fs500_pre32_sw34_r001_fft_bin_groundtruth.csv
-```
-
-该文件包含 8 个 PHY header symbols 和 49 个 payload symbols。详细来源、字段定义与
-交叉验证结果见同目录 `README.md`。
-
 ## 当前边界
 
 ```text
 已经接通并实际验证：
-IQ -> preamble -> frame locator -> frame sync -> 普通 FFT-bin
+held-out OTA -> RFSR -> clean FrameSync -> 加噪 -> 固定同步 Savaux -> 条件 SER
+
+保留的通用 baseline：
+IQ -> preamble -> frame locator -> FrameSync -> 普通 FFT-bin
 
 已实现但未接入默认入口：
-payload codec、OS-LoRa/GLS、各类 baseline
+payload codec、OS-LoRa/GLS、各类历史 baseline
 
 当前不应默认宣称已验证：
 payload bytes、dewhitening、最终 CRC 的端到端正确性

@@ -28,6 +28,10 @@ from rfsr.nn import (
     ReferencePhyPretrainingDataset,
     SyntheticLoRaDataset,
 )
+from rfsr.nn.ota_dataset import (
+    bind_checkpoint_split_manifest,
+    build_ota_split_manifest,
+)
 from rfsr.interp import resample_poly_torch_batch2
 
 os.environ[
@@ -1142,7 +1146,20 @@ if __name__ == "__main__":
             f"{validation_dataset.size}/{test_dataset.size}, "
             f"ota_root={OTA_ROOT}, target={OTA_TARGET}"
         )
+        ota_split_manifest = build_ota_split_manifest(
+            {
+                "train": dataset,
+                "validation": validation_dataset,
+                "test": test_dataset,
+            },
+            split_seed=OTA_SPLIT_SEED,
+            max_groups=OTA_MAX_GROUPS,
+            target_source=OTA_TARGET,
+            oversampling=OSF,
+            downsampling=DSF,
+        )
     else:
+        ota_split_manifest = None
         validation_dataset = None
         test_dataset = None
         dataset = build_synthetic_dataset(
@@ -1208,6 +1225,12 @@ if __name__ == "__main__":
     # 同名 checkpoint 优先用于续训；仅在它不存在时才加载预训练权重，
     # 从而支持 synthetic -> OTA 两阶段训练且不会覆盖已经开始的 OTA 进度。
     current_checkpoint = Path("checkpoints") / f"{model_name}.pth"
+    if ota_split_manifest is not None:
+        split_manifest_path = bind_checkpoint_split_manifest(
+            current_checkpoint,
+            ota_split_manifest,
+        )
+        print(f"Checkpoint split manifest: {split_manifest_path}")
     resume_current_checkpoint = current_checkpoint.is_file()
     loss_history, model = load_existing_state(model_name, model)
     if not resume_current_checkpoint and PRETRAINED is not None:

@@ -79,6 +79,11 @@ from .nonuniform_sampling import (
     select_pattern_subset,
     select_pattern_subset_by_information,
 )
+from .synchronized_savaux import (
+    SynchronizedSavauxResult,
+    SynchronizedSavauxSymbol,
+    demod_synchronized_savaux,
+)
 
 __all__ = [
     "ChirpSVDSpectra",
@@ -88,6 +93,8 @@ __all__ = [
     "NonuniformPatternBank",
     "NonuniformScoreResult",
     "PatternSubsetSelection",
+    "SynchronizedSavauxResult",
+    "SynchronizedSavauxSymbol",
     "build_pattern_bank",
     "candidate_phase_jump_scores",
     "choose_downsample_phases",
@@ -97,6 +104,7 @@ __all__ = [
     "combine_subnyquist_components",
     "crossfit_gls_spectrum_power",
     "crossfit_weighted_spectrum",
+    "demod_synchronized_savaux",
     "low_rank_chirp_matrix",
     "lora_branch_color_mismatch",
     "lora_interbin_leakage_covariance",

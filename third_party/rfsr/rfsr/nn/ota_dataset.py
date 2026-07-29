@@ -18,6 +18,96 @@ DEFAULT_DATASET_ROOT = (
 )
 
 
+def checkpoint_split_manifest_path(checkpoint: str | Path) -> Path:
+    """Return the split sidecar path bound to one checkpoint filename."""
+
+    path = Path(checkpoint).expanduser().resolve()
+    return path.with_name(f"{path.stem}_split_manifest.json")
+
+
+def build_ota_split_manifest(
+    datasets: dict[str, object],
+    *,
+    split_seed: int,
+    max_groups: int | None,
+    target_source: str,
+    oversampling: int,
+    downsampling: int,
+) -> dict[str, object]:
+    """Describe and prove the physical-packet split used by OTA training."""
+
+    required = ("train", "validation", "test")
+    if set(datasets) != set(required):
+        raise ValueError("datasets must contain train, validation, and test")
+    groups = {
+        split: sorted(
+            {
+                str(record["split_group"])
+                for record in datasets[split].records
+            }
+        )
+        for split in required
+    }
+    sets = {split: set(values) for split, values in groups.items()}
+    overlaps = {
+        "train_validation": sorted(sets["train"] & sets["validation"]),
+        "train_test": sorted(sets["train"] & sets["test"]),
+        "validation_test": sorted(sets["validation"] & sets["test"]),
+    }
+    if any(overlaps.values()):
+        raise RuntimeError("physical packet leakage across OTA splits")
+    roots = {
+        str(Path(datasets[split].dataset_root).resolve()) for split in required
+    }
+    if len(roots) != 1:
+        raise ValueError("all OTA splits must use the same dataset root")
+    return {
+        "schema": "lora-rfsr-checkpoint-split-v1",
+        "dataset_root": roots.pop(),
+        "target_source": str(target_source),
+        "oversampling": int(oversampling),
+        "downsampling": int(downsampling),
+        "algorithm": "deterministic physical-packet 6:2:2",
+        "split_seed": int(split_seed),
+        "max_groups": None if max_groups is None else int(max_groups),
+        "physical_packet_counts": {
+            split: len(groups[split]) for split in required
+        },
+        "disjoint": True,
+        "overlaps": overlaps,
+        **groups,
+    }
+
+
+def bind_checkpoint_split_manifest(
+    checkpoint: str | Path,
+    manifest: dict[str, object],
+) -> Path:
+    """Write a new split binding or reject an incompatible checkpoint resume."""
+
+    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    manifest_path = checkpoint_split_manifest_path(checkpoint_path)
+    if manifest_path.is_file():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing != manifest:
+            raise RuntimeError(
+                "OTA split manifest does not match this checkpoint; refusing "
+                f"to resume: {manifest_path}"
+            )
+        return manifest_path
+    if checkpoint_path.is_file():
+        raise RuntimeError(
+            "existing OTA checkpoint has no split manifest; refusing an "
+            f"unverifiable resume: {checkpoint_path}"
+        )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def _resolve_relative(root: Path, value: str, *, label: str) -> Path:
     relative = Path(value)
     if relative.is_absolute():

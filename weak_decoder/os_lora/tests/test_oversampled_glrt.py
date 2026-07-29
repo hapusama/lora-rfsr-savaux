@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from weak_decoder.baselines.savaux_oversampled.paper_oversampled_demod import (
+    _paper_branch_spectrum,
     paper_oversampled_spectrum,
 )
 from weak_decoder.baselines.common import noise_samples
@@ -35,6 +36,31 @@ from weak_decoder.os_lora.system.oversampled_glrt import (
 
 
 class OversampledGLRTTests(unittest.TestCase):
+    def test_fast_savaux_branch_matches_dense_equation_36(self) -> None:
+        sf = 5
+        os_factor = 4
+        n_bins = 1 << sf
+        rng = np.random.default_rng(20260729)
+        branch = (
+            rng.normal(size=n_bins) + 1j * rng.normal(size=n_bins)
+        ).astype(np.complex64)
+        k = np.arange(n_bins, dtype=np.float64)[:, None]
+        p = np.arange(n_bins, dtype=np.float64)[None, :]
+        kernel = np.exp(-2j * np.pi * k * p / float(n_bins))
+        for q in range(os_factor):
+            phase = np.ones((n_bins, n_bins), dtype=np.complex128)
+            if q:
+                phase[(k > 0) & (p >= float(n_bins) - k)] = np.exp(
+                    2j * np.pi * q / float(os_factor)
+                )
+            expected = (
+                (kernel * phase) @ branch / np.sqrt(float(n_bins))
+            ).astype(np.complex64)
+            actual = _paper_branch_spectrum(branch, sf, os_factor, q)
+            np.testing.assert_allclose(
+                actual, expected, rtol=2e-5, atol=2e-5
+            )
+
     def test_coherent_combination_ratio_tracks_phase_alignment(self) -> None:
         aligned, _combined, _power = coherent_combination_ratio(1.0, 1.0j, np.pi / 2.0)
         cancelled, _combined, _power = coherent_combination_ratio(1.0, -1.0j, np.pi / 2.0)
