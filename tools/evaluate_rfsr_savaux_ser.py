@@ -89,6 +89,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ota-max-groups", type=int, default=100)
     parser.add_argument("--ota-split-seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--packet-uid",
+        action="append",
+        default=None,
+        help=(
+            "只评估指定 test 物理包 UID；可重复传入。UID 必须属于当前 "
+            "checkpoint 绑定的 held-out test split。"
+        ),
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--workers",
@@ -289,6 +298,35 @@ def _physical_groups(dataset: Any) -> list[str]:
     return sorted({str(record["split_group"]) for record in dataset.records})
 
 
+def _select_canonical_packet_indices(
+    records: list[dict[str, Any]],
+    requested_uids: Iterable[str] | None,
+    limit: int | None,
+) -> list[int]:
+    """选择 canonical q0/ADC0 视图，并严格校验显式物理包 UID。"""
+
+    canonical = {
+        str(record["split_group"]): index
+        for index, record in enumerate(records)
+        if int(record["adc_phase"]) == 0
+        and int(record["lowrate_phase"]) == 0
+    }
+    if requested_uids:
+        requested = list(dict.fromkeys(str(uid) for uid in requested_uids))
+        missing = [uid for uid in requested if uid not in canonical]
+        if missing:
+            raise ValueError(
+                "requested --packet-uid is not a canonical packet in the "
+                f"current held-out test split: {missing}"
+            )
+        selected = [canonical[uid] for uid in requested]
+    else:
+        selected = list(canonical.values())
+    if limit is not None:
+        selected = selected[: int(limit)]
+    return selected
+
+
 def _split_manifest(datasets: dict[str, Any], seed: int, max_groups: int) -> dict[str, Any]:
     """生成本次评估的数据划分记录，并检查物理包是否跨 split 泄漏。"""
 
@@ -354,7 +392,6 @@ def _checkpoint_split_binding(
     expected_scalars = {
         "split_seed": evaluated_split["split_seed"],
         "max_groups": evaluated_split["max_groups"],
-        "target_source": "received",
     }
     for key, expected in expected_scalars.items():
         if training.get(key) != expected:
@@ -369,11 +406,18 @@ def _checkpoint_split_binding(
             "evaluation split does not match checkpoint training binding: "
             + "; ".join(errors)
         )
+    target_source = training.get("target_source")
+    if target_source not in {"received", "reference"}:
+        raise RuntimeError(
+            "checkpoint split binding has unsupported target_source: "
+            f"{target_source!r}"
+        )
     return {
         "status": "verified",
         "verified": True,
         "manifest_path": str(manifest_path),
         "schema": training.get("schema"),
+        "training_target_source": target_source,
     }
 
 
@@ -856,13 +900,9 @@ def main() -> None:
     )
     test_dataset = datasets["test"]
     # 每个物理包只评估一个 canonical ADC0/q0 视图，避免把同包视图当独立样本。
-    selected = [
-        index
-        for index, record in enumerate(test_dataset.records)
-        if int(record["adc_phase"]) == 0 and int(record["lowrate_phase"]) == 0
-    ]
-    if args.limit is not None:
-        selected = selected[: int(args.limit)]
+    selected = _select_canonical_packet_indices(
+        test_dataset.records, args.packet_uid, args.limit
+    )
     if not selected:
         raise RuntimeError("test split contains no canonical ADC0/q0 packet views")
 

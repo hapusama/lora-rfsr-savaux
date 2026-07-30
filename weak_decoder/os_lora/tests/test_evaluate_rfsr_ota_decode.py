@@ -34,6 +34,28 @@ class _Args:
 
 
 class EvaluateRfsrOtaDecodeTests(unittest.TestCase):
+    def test_worker_count_and_explicit_packet_selection(self) -> None:
+        available = MODULE.available_cpu_count()
+        self.assertEqual(MODULE.resolve_worker_count(1, 100), 1)
+        self.assertEqual(
+            MODULE.resolve_worker_count(available + 10, 3),
+            min(available, 3),
+        )
+        records = [
+            {"split_group": "packet-a", "adc_phase": 0, "lowrate_phase": 0},
+            {"split_group": "packet-b", "adc_phase": 0, "lowrate_phase": 0},
+        ]
+        self.assertEqual(
+            MODULE._select_canonical_packet_indices(
+                records, ["packet-b", "packet-a"], 1
+            ),
+            [1],
+        )
+        with self.assertRaisesRegex(ValueError, "packet-c"):
+            MODULE._select_canonical_packet_indices(
+                records, ["packet-c"], None
+            )
+
     def test_descending_half_db_grid_includes_endpoint(self) -> None:
         points = MODULE.resolve_extra_snr_points(
             _Args(start=-14.0, stop=-16.0, step=-0.5)

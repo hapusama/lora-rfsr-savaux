@@ -78,6 +78,23 @@ class EvaluateRfsrSavauxSerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workers"):
             MODULE.resolve_worker_count(-1, 3)
 
+    def test_explicit_packet_uids_preserve_requested_order(self) -> None:
+        records = [
+            {"split_group": "packet-a", "adc_phase": 0, "lowrate_phase": 0},
+            {"split_group": "packet-b", "adc_phase": 0, "lowrate_phase": 0},
+            {"split_group": "packet-a", "adc_phase": 1, "lowrate_phase": 0},
+        ]
+        self.assertEqual(
+            MODULE._select_canonical_packet_indices(
+                records, ["packet-b", "packet-a"], None
+            ),
+            [1, 0],
+        )
+        with self.assertRaisesRegex(ValueError, "packet-c"):
+            MODULE._select_canonical_packet_indices(
+                records, ["packet-c"], None
+            )
+
     def test_reference_ids_are_converted_to_hard_symbols(self) -> None:
         metadata = {
             "packet": {"frame_bytes": 33},

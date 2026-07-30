@@ -66,19 +66,32 @@ def _wrapped_tail_kernel(n_bins: int) -> _WrappedTailKernel:
 
 
 @lru_cache(maxsize=16)
+def _branch_combination_weights(n_bins: int, os_factor: int) -> np.ndarray:
+    """缓存任意 DFT 长度的 Eq. (37) branch 合并相位。"""
+
+    length = int(n_bins)
+    if length <= 0:
+        raise ValueError("n_bins must be positive")
+    os_value = _validate_os_factor(os_factor)
+    bins = np.arange(length, dtype=np.float64)
+    branches = np.arange(os_value, dtype=np.float64)[:, np.newaxis]
+    branch_weights = np.exp(
+        -2j * np.pi * branches * bins[np.newaxis, :]
+        / float(length * os_value)
+    )
+    branch_weights.setflags(write=False)
+    return branch_weights
+
+
+@lru_cache(maxsize=16)
 def _savaux_kernel(sf: int, os_factor: int) -> _SavauxKernel:
     """缓存 branch 的 Eq. (37) 相位和 Eq. (36) wrap 相位。"""
 
     n_bins = 1 << int(sf)
     os_value = _validate_os_factor(os_factor)
-    bins = np.arange(n_bins, dtype=np.float64)
-    branches = np.arange(os_value, dtype=np.float64)[:, np.newaxis]
-    branch_weights = np.exp(
-        -2j * np.pi * branches * bins[np.newaxis, :]
-        / float(n_bins * os_value)
-    )
-    wrap_phases = np.exp(2j * np.pi * branches[:, 0] / float(os_value))
-    branch_weights.setflags(write=False)
+    branch_weights = _branch_combination_weights(n_bins, os_value)
+    branches = np.arange(os_value, dtype=np.float64)
+    wrap_phases = np.exp(2j * np.pi * branches / float(os_value))
     wrap_phases.setflags(write=False)
     return _SavauxKernel(
         branch_weights=branch_weights,
@@ -252,7 +265,7 @@ def combine_paper_branch_spectra(
     if len(spectra) != os_value:
         raise ValueError(f"got {len(spectra)} branch spectra, expected {os_value}")
 
-    weights = _savaux_kernel(int(math.log2(n_bins)), os_value).branch_weights
+    weights = _branch_combination_weights(n_bins, os_value)
     combined = np.zeros(n_bins, dtype=np.complex128)
     for q, spectrum in enumerate(spectra):
         # Eq. (37): 每个 branch q 的同一个候选 k 需要乘

@@ -91,7 +91,7 @@ python -B tools/evaluate_rfsr_savaux_ser.py \
   --device cuda --include-clean-output \
   --method rfsr_1msps --method native_1msps \
   --extra-snr-start-db -20 --extra-snr-stop-db -34 --extra-snr-step-db -0.25 \
-  --noise-seed 20260728 --noise-seed-count 5
+  --noise-seed 20260728 --noise-seed-count 5 --workers 0
 ```
 
 入口先在未额外加噪的 RFSR 输出上调用
@@ -100,6 +100,9 @@ python -B tools/evaluate_rfsr_savaux_ser.py \
 `weak_decoder/os_lora/system/synchronized_savaux.py` 复用同一份 FrameSync 完成
 header-first Savaux 解调；加噪后不会重新同步。只有干净输出 FrameSync 成功的包
 进入 SER 分母，参考 metadata 只在全部 SNR 的硬判决完成后用于评分。
+`--workers 0` 会按容器实际可用 CPU 自动并行干净 FrameSync 和随后独立的
+包级 Savaux；RFSR 仍保持单 GPU 进程。默认 JSON 只保存汇总，需逐 symbol 审计时
+追加 `--save-symbol-details`。
 
 ### 用 raw 33-byte frame 做合成预训练
 
@@ -220,10 +223,11 @@ STO 也只加入输入 `x`。每条样本独立抽取初始 `τ₀` 和逐符号
 
 ### OTA 严格 RF-SR 微调与解码测试
 
-OTA 微调不能把真实接收的低采样 IQ 配到理想发射 reference；那会迫使网络
-消除 CFO、SFO、增益和噪声，既不收敛也不符合 RF-SR 前端职责。默认
-`--ota-target received` 使用同一条 1 MSPS OTA 波形作为标签，低采样输入只是
-它的固定 q 相位抽取。训练数据不做 CFO、SFO、幅度或复增益校正。
+OTA 微调默认使用 `--ota-target reference`：输入是低采样率接收 IQ，标签是与
+该包配对的合成 PHY reference。reference 只在离线训练时提供监督；部署和评估时
+仍是原始 250 kS/s IQ 先经过 RFSR，再由 FrameSync 估计同步参数，不会在 RFSR 前
+调用 FrameSync 或向其提供 reference。`--ota-target received` 保留为复现历史
+received-to-received checkpoint 的显式选项。
 
 以下命令用固定 seed 从物理包中选择 100 个，并按物理包严格划成
 60/20/20（训练/验证/测试）的 6:2:2；同一包的两个 ADC phase 与四个 q phase
@@ -242,7 +246,7 @@ python -B /root/lora-rfsr-savaux/third_party/rfsr/rfsr/nn/nn.py \
   --learning_rate 0.0001 --weight_decay 1e-5 --optimizer adam \
   --ota \
   --ota-root /root/autodl-tmp/lora-rfsr-savaux/data/reference_phy/rfsr_db \
-  --ota-target received \
+  --ota-target reference \
   --ota-max-groups 100 --ota-split-seed 42 \
   --early-stop-patience 10 \
   --pretrained /root/autodl-tmp/rfsr-run/pretrain/checkpoints/model_model0v0_bs5_osf4_ds250_lr0.001_wd1e-05_synthref_random_snr-22to10_cfo0_stonone.pth
@@ -284,7 +288,7 @@ python -B tools/evaluate_rfsr_savaux_ser.py \
   --device cuda --include-clean-output \
   --method rfsr_1msps --method native_1msps \
   --extra-snr-start-db -20 --extra-snr-stop-db -34 --extra-snr-step-db -0.25 \
-  --noise-seed 20260728 --noise-seed-count 5
+  --noise-seed 20260728 --noise-seed-count 5 --workers 0
 ```
 
 输出 JSON 的

@@ -169,7 +169,7 @@ python -B tools/evaluate_rfsr_savaux_ser.py \
   --device cuda --include-clean-output \
   --method rfsr_1msps --method native_1msps \
   --extra-snr-start-db -20 --extra-snr-stop-db -34 --extra-snr-step-db -0.25 \
-  --noise-seed 20260728 --noise-seed-count 5
+  --noise-seed 20260728 --noise-seed-count 5 --workers 0
 ```
 
 默认统计 RFSR payload SER；追加 `--ser-section all` 可统计 header+payload，重复
@@ -177,9 +177,14 @@ python -B tools/evaluate_rfsr_savaux_ser.py \
 旧结果文件
 `/root/autodl-tmp/rfsr-run/finetune/rfsr_savaux_ser_heldout5_grid.json`
 使用的是把同步失败包按全错计入的 v1 口径，不能与现在的条件 SER 混用。
-当前输出 schema 为 `lora-rfsr-clean-sync-then-noisy-savaux-ser-v4`，同时保存
+当前输出 schema 为 `lora-rfsr-clean-sync-then-noisy-savaux-ser-v5`，同时保存
 `packet_count`、`clean_synchronized_packets`、`clean_sync_success_rate`、
 `ser_packet_count`、`symbol_errors/symbol_count` 和条件 `ser`。两支路使用原生
 1 MS/s OTA 包功率定义同一噪声功率，并叠加相同复 AWGN。`aggregate_by_snr`
 跨 seed 汇总，`paired_rfsr_vs_native` 只使用两边共同 clean-sync 成功的相同尝试。
 正式曲线使用 100 包划分留下的 20 个 test 物理包和多个 AWGN seed。
+
+性能方面，`--workers 0`（默认）会依据当前容器的 CPU affinity/cgroup 配额自动
+选择线程数，并行执行独立包的干净 FrameSync 与固定同步后的 Savaux。RFSR 推理仍在
+单 GPU 进程内顺序执行，避免多个 CUDA context 争抢显存。默认输出只保留汇总诊断；
+追加 `--save-symbol-details` 才保存每个 symbol 的硬判决与逐 symbol 评分。

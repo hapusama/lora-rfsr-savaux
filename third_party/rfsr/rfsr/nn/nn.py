@@ -534,10 +534,10 @@ def parse_args():
     parser.add_argument(
         "--ota-target",
         choices=("received", "reference"),
-        default="received",
+        default="reference",
         help=(
-            "OTA 高采样标签。received 使用同一接收 OTA 波形（严格 RF-SR，"
-            "默认）；reference 仅保留给旧的 received-to-ideal 对照实验。"
+            "OTA 高采样标签。reference 使用与接收包配对的合成 PHY 波形（默认）；"
+            "received 使用同一接收 OTA 波形，仅用于复现历史 received-to-received 实验。"
         ),
     )
     parser.add_argument(
@@ -1109,8 +1109,8 @@ if __name__ == "__main__":
                 "model3's legacy asymmetric trim is not compatible with the "
                 "aligned manifest dataset; use model0 for this OTA stage."
             )
-        # 一个物理包的所有 ADC/polyphase 视图只能在同一个 split。默认
-        # received 标签是同一接收波形的 1 MS/s 版本，不做 CFO/SFO/增益校正。
+        # 一个物理包的所有 ADC/polyphase 视图只能在同一个 split。默认 reference
+        # 标签是离线生成并配对的合成 PHY 波形；received 仅保留给历史对照。
         dataset = OTALoRaDataset(
             oversampling=OSF,
             downsampling=DSF,
@@ -1259,7 +1259,8 @@ if __name__ == "__main__":
             return model(xb, snr_b)
         return model(xb)
 
-    # 标准监督训练：低速率 OTA IQ -> RF-SR -> 同一接收波形的高采样 OTA IQ。
+    # 标准监督训练：低速率 OTA IQ -> RF-SR -> 由 --ota-target 选择的
+    # 高采样标签（默认是配对 synthetic reference；received 仅用于历史对照）。
     for epoch in range(NUM_EPOCHS):
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
         running_loss = 0.0

@@ -10,8 +10,11 @@ RFSR 始终位于接收链最前端：输入是未经 CFO、SFO、增益或幅�
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import json
 import math
+import multiprocessing
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -38,6 +41,40 @@ SAVAUX_METHODS = (
 )
 
 
+def available_cpu_count() -> int:
+    """返回考虑 affinity 和 cgroup quota 后的实际可用 CPU 数。"""
+
+    candidates = [max(1, int(os.cpu_count() or 1))]
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            candidates.append(max(1, len(os.sched_getaffinity(0))))
+        except OSError:
+            pass
+
+    cpu_max = Path("/sys/fs/cgroup/cpu.max")
+    try:
+        quota_text, period_text = cpu_max.read_text(encoding="ascii").split()
+        if quota_text != "max":
+            quota = int(quota_text)
+            period = int(period_text)
+            if quota > 0 and period > 0:
+                candidates.append(max(1, math.ceil(quota / period)))
+    except (OSError, ValueError):
+        pass
+    return min(candidates)
+
+
+def resolve_worker_count(requested: int, task_count: int) -> int:
+    """把解码线程数限制在实际 CPU 和 GNU Radio 任务数以内。"""
+
+    count = int(requested)
+    if count < 0:
+        raise ValueError("--workers must be zero (automatic) or positive")
+    available = available_cpu_count()
+    target = available if count == 0 else count
+    return max(1, min(target, available, max(1, int(task_count))))
+
+
 def parse_args() -> argparse.Namespace:
     """解析 OTA、噪声扫描和可选 Savaux/GLS 诊断参数。"""
 
@@ -48,7 +85,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ota-max-groups", type=int, default=None)
     parser.add_argument("--ota-split-seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--packet-uid",
+        action="append",
+        default=None,
+        help=(
+            "只评估指定 test 物理包 UID；可重复传入。用于让不同 checkpoint "
+            "在共同 held-out 物理包上做严格配对比较。"
+        ),
+    )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "并行运行完整 GNU Radio 解码链的独立进程数；1（默认）保持历史串行"
+            "行为，0 自动使用当前容器可用 CPU。RFSR CUDA 推理始终留在主进程。"
+        ),
+    )
     parser.add_argument(
         "--rfsr-snr-conditioning",
         choices=("manifest", "minimum"),
@@ -212,6 +267,35 @@ def _complex_from_channels(value) -> np.ndarray:
     return np.asarray(value[0].numpy() + 1j * value[1].numpy(), dtype=np.complex64)
 
 
+def _select_canonical_packet_indices(
+    records: list[dict[str, Any]],
+    requested_uids: Iterable[str] | None,
+    limit: int | None,
+) -> list[int]:
+    """选择 canonical q0/ADC0 视图，并拒绝不属于当前 test split 的 UID。"""
+
+    canonical = {
+        str(record["split_group"]): index
+        for index, record in enumerate(records)
+        if int(record["adc_phase"]) == 0
+        and int(record["lowrate_phase"]) == 0
+    }
+    if requested_uids:
+        requested = list(dict.fromkeys(str(uid) for uid in requested_uids))
+        missing = [uid for uid in requested if uid not in canonical]
+        if missing:
+            raise ValueError(
+                "requested --packet-uid is not a canonical packet in the "
+                f"current held-out test split: {missing}"
+            )
+        selected = [canonical[uid] for uid in requested]
+    else:
+        selected = list(canonical.values())
+    if limit is not None:
+        selected = selected[: int(limit)]
+    return selected
+
+
 def _extra_awgn_power(samples: np.ndarray, snr_db: float | None) -> float:
     """计算额外 AWGN 功率；None 表示原始 OTA，不增加人工噪声。"""
 
@@ -291,11 +375,28 @@ def _decode_cfile(
 ) -> dict[str, Any]:
     """把一条 IQ 支路接到完整 gr-lora_sdr 链，并按 CRC 与完整帧评分。"""
 
-    # 延迟导入使 --help 和没有 GNU Radio 的单元测试也可以执行。
+    np.asarray(samples, dtype=np.dtype("<c8")).tofile(path)
+    return _decode_existing_cfile(
+        path=path,
+        expected_frame_hex=expected_frame_hex,
+        detector_options=vars(_detector_args(args, sample_rate_hz)),
+    )
+
+
+def _decode_existing_cfile(
+    *,
+    path: Path,
+    expected_frame_hex: str,
+    detector_options: dict[str, Any],
+) -> dict[str, Any]:
+    """在独立进程中读取已落盘 IQ，避免共享 GNU Radio/CUDA 运行时状态。"""
+
+    # 延迟导入使 spawn 子进程只初始化 GNU Radio，不初始化父进程的 CUDA context。
     from noisy_iq.detector import run_grlora_packet_detector
 
-    np.asarray(samples, dtype=np.dtype("<c8")).tofile(path)
-    packets = run_grlora_packet_detector(path, _detector_args(args, sample_rate_hz))
+    packets = run_grlora_packet_detector(
+        Path(path), argparse.Namespace(**detector_options)
+    )
     expected = _normalize_hex(expected_frame_hex)
     decoded = [
         {
@@ -596,6 +697,8 @@ def main() -> None:
     args = parse_args()
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be positive")
+    if int(args.workers) < 0:
+        raise ValueError("--workers must be zero (automatic) or positive")
     if int(args.savaux_symbol_count) < 0:
         raise ValueError("--savaux-symbol-count must be non-negative")
     if int(args.savaux_noise_windows) < 1:
@@ -637,15 +740,25 @@ def main() -> None:
     )
     # 只取 q0/ADC0，因此每个物理发送包只被完整解码一次；其他 phase 绝不进入
     # 训练/测试交叉边界，也不被当作独立 packet 计数。
-    selected = [
-        index
-        for index, record in enumerate(dataset.records)
-        if int(record["adc_phase"]) == 0 and int(record["lowrate_phase"]) == 0
-    ]
-    if args.limit is not None:
-        selected = selected[: args.limit]
+    selected = _select_canonical_packet_indices(
+        dataset.records, args.packet_uid, args.limit
+    )
     if not selected:
         raise RuntimeError("no q0/ADC-phase-0 packet available in test split")
+    worker_count = resolve_worker_count(
+        int(args.workers), len(selected) * len(DECODE_METHODS)
+    )
+    print(
+        json.dumps(
+            {
+                "parallel_backend": "process_pool_spawn",
+                "available_cpu_count": available_cpu_count(),
+                "worker_count": worker_count,
+                "rfsr_inference": "single_main_process",
+                "gnuradio_decode": "parallel_independent_branches",
+            }
+        )
+    )
     # GLS 协方差可额外使用同一 test split 内 ADC1 的包前噪声；它们和 q0 一样
     # 属于完全留出的物理包，但不会进入 packet 成功率或逐符号真值统计。
     selected_groups = {str(dataset.records[index]["split_group"]) for index in selected}
@@ -663,6 +776,7 @@ def main() -> None:
         added_noise_powers: list[float] = []
         with tempfile.TemporaryDirectory(prefix="rfsr-ota-decode-") as temporary:
             temporary_root = Path(temporary)
+            prepared_rows: list[dict[str, Any]] = []
             for ordinal, index in enumerate(selected):
                 x, y, snr = dataset[index]
                 del x  # 高率 received target 与 q0 低率输入严格同相位，下面直接再抽取 low。
@@ -687,24 +801,25 @@ def main() -> None:
                 )
                 ota_metadata = _load_json(_metadata_path(ota_root, record))
                 expected_frame_hex = str(ota_metadata["packet"]["expected_frame_hex"])
-                method_results = {
-                    name: _decode_cfile(
-                        samples=values,
-                        sample_rate_hz=sample_rate_hz,
-                        expected_frame_hex=expected_frame_hex,
-                        path=temporary_root / f"packet{ordinal:03d}_{name}.cfile",
-                        args=args,
+                decode_inputs: list[tuple[str, Path, dict[str, Any]]] = []
+                for name, values, sample_rate_hz in methods:
+                    path = temporary_root / f"packet{ordinal:03d}_{name}.cfile"
+                    np.asarray(values, dtype=np.dtype("<c8")).tofile(path)
+                    decode_inputs.append(
+                        (
+                            name,
+                            path,
+                            vars(_detector_args(args, sample_rate_hz)),
+                        )
                     )
-                    for name, values, sample_rate_hz in methods
-                }
-                rows.append(
+                prepared_rows.append(
                     {
                         "physical_packet_uid": record["split_group"],
                         "view_id": record["view_id"],
                         "source_snr_db": source_snr_db,
                         "rfsr_conditioning_snr_db": conditioning_snr_db,
                         "expected_frame_hex": expected_frame_hex,
-                        "methods": method_results,
+                        "decode_inputs": decode_inputs,
                     }
                 )
                 if _condition_runs_savaux(args, extra_snr_db):
@@ -725,6 +840,43 @@ def main() -> None:
                             },
                         }
                     )
+
+            if worker_count == 1:
+                for prepared in prepared_rows:
+                    decode_inputs = prepared.pop("decode_inputs")
+                    prepared["methods"] = {
+                        name: _decode_existing_cfile(
+                            path=path,
+                            expected_frame_hex=str(prepared["expected_frame_hex"]),
+                            detector_options=detector_options,
+                        )
+                        for name, path, detector_options in decode_inputs
+                    }
+                    rows.append(prepared)
+            else:
+                # spawn 子进程不会继承已经初始化的 CUDA context；每个进程只加载
+                # GNU Radio 并读取父进程写好的 cfile，隔离其非线程安全 C++ 状态。
+                with ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=multiprocessing.get_context("spawn"),
+                ) as executor:
+                    futures: list[tuple[dict[str, Any], str, Any]] = []
+                    for prepared in prepared_rows:
+                        for name, path, detector_options in prepared["decode_inputs"]:
+                            future = executor.submit(
+                                _decode_existing_cfile,
+                                path=path,
+                                expected_frame_hex=str(
+                                    prepared["expected_frame_hex"]
+                                ),
+                                detector_options=detector_options,
+                            )
+                            futures.append((prepared, name, future))
+                    for prepared, name, future in futures:
+                        prepared.setdefault("methods", {})[name] = future.result()
+                for prepared in prepared_rows:
+                    prepared.pop("decode_inputs")
+                    rows.append(prepared)
 
         condition: dict[str, Any] = {
             "label": _condition_label(extra_snr_db),
@@ -794,9 +946,21 @@ def main() -> None:
     payload: dict[str, Any] = {
         "schema": "lora-rfsr-ota-decoder-evaluation-v2",
         "test_split": "physical-packet 6:2:2, held-out test",
-        "target": "received OTA; no training-side CFO/SFO/gain correction",
+        "evaluation_waveform": (
+            "received OTA; RFSR runs before packet detection and FrameSync"
+        ),
         "rfsr_snr_conditioning": str(args.rfsr_snr_conditioning),
         "packet_count_per_condition": len(selected),
+        "evaluated_test_packets": [
+            str(dataset.records[index]["split_group"]) for index in selected
+        ],
+        "execution": {
+            "parallel_backend": "process_pool_spawn",
+            "available_cpu_count": available_cpu_count(),
+            "worker_count": worker_count,
+            "rfsr_inference": "single_main_process",
+            "gnuradio_decode": "parallel_independent_branches",
+        },
         "rfsr": frontend.provenance.__dict__,
         "conditions": conditions,
     }
