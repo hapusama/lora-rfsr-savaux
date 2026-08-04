@@ -50,6 +50,11 @@ data/results/*
 /data/reference_phy/rfsr_db/ota
 /data/reference_phy/rfsr_db/reference
 
+# Locally downloaded official RFSR-OTA IQ, compressed frames and sidecars.
+# Keep the tracked README, Dataverse manifest and metadata JSON files above them.
+/data/rfsr_ota_official/ota/
+/data/rfsr_ota_official/reference/
+
 # Local training artifacts. The three published upstream checkpoints are allowed.
 /checkpoints/
 third_party/rfsr/checkpoints/*
